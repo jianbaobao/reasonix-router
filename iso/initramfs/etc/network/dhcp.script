@@ -1,0 +1,73 @@
+#!/bin/sh
+# udhcpc 的 DHCP 客户端脚本
+# 当从 DHCP 服务器获得/释放 IP 时被调用
+
+RESOLV_CONF="/etc/resolv.conf"
+
+# 辅助函数: 将点分十进制掩码转为 CIDR 前缀长度
+# 使用 tr 分割后遍历
+netmask_to_cidr() {
+    _c=0
+    echo "$1" | tr '.' '\n' | while read _octet; do
+        case "$_octet" in
+            255) _c=$((_c + 8)) ;;
+            254) _c=$((_c + 7)) ;;
+            252) _c=$((_c + 6)) ;;
+            248) _c=$((_c + 5)) ;;
+            240) _c=$((_c + 4)) ;;
+            224) _c=$((_c + 3)) ;;
+            192) _c=$((_c + 2)) ;;
+            128) _c=$((_c + 1)) ;;
+            0)   ;;
+        esac
+        echo "$_c"
+    done | tail -1
+}
+
+case "$1" in
+    bound|renew)
+        # 配置接口 IP (udhcpc 的 subnet 是点分十进制掩码, 需要转 CIDR)
+        # 先 flush 再添加，防止重复 IP
+        ip addr flush dev "$interface" 2>/dev/null
+        if [ -n "$ip" ]; then
+            if [ -n "$subnet" ]; then
+                prefix=$(netmask_to_cidr "$subnet")
+                ip addr add "$ip/$prefix" dev "$interface"
+            else
+                ip addr add "$ip/24" dev "$interface"
+            fi
+        fi
+
+        # 默认路由
+        if [ -n "$router" ]; then
+            # 删除旧默认路由
+            ip route del default 2>/dev/null
+            for r in $router; do
+                ip route add default via "$r" dev "$interface"
+            done
+        fi
+
+        # DNS 服务器
+        if [ -n "$dns" ]; then
+            > "$RESOLV_CONF"
+            for ns in $dns; do
+                echo "nameserver $ns" >> "$RESOLV_CONF"
+            done
+        fi
+
+        echo "  DHCP: Bound - IP=$ip Gateway=$router"
+        ;;
+
+    deconfig)
+        # 释放 IP
+        ip addr flush dev "$interface" 2>/dev/null
+        ip route del default 2>/dev/null
+        echo "  DHCP: Deconfigured"
+        ;;
+
+    leasefail|nak)
+        echo "  DHCP: Lease failed or NAK received"
+        ;;
+esac
+
+exit 0

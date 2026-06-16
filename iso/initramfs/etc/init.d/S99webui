@@ -1,0 +1,89 @@
+#!/bin/sh
+# ============================================================
+#  Web 管理界面服务
+#  内建 HTTP 服务器 (纯 shell + /www)
+# ============================================================
+
+echo "Starting Web Management UI..."
+
+# 先尝试使用 busybox httpd
+if busybox httpd --help 2>/dev/null >/dev/null; then
+    cd /www
+    # 启动 HTTP 服务器，启用 CGI
+    # -p 80: 监听端口
+    # -h /www: 文档根目录
+    # -c /cgi-bin: CGI 脚本目录
+    busybox httpd -p 80 -h /www -c cgi-bin &
+    echo "  Web UI: http://192.168.2.1 (busybox httpd + CGI)"
+    exit 0
+fi
+
+# 备用: 使用简单的 shell HTTP 服务器
+cat > /sbin/webui.sh << 'WEBSRV'
+#!/bin/sh
+# 极简 HTTP 服务器 (纯 POSIX shell)
+# 仅用于应急情况
+
+send_response() {
+    local file="$1"
+    local code="$2"
+    local content_type="$3"
+
+    printf "HTTP/1.0 %s\r\n" "$code"
+    printf "Server: Reasonix-Router/1.0\r\n"
+    printf "Content-Type: %s\r\n" "$content_type"
+    printf "Connection: close\r\n"
+    printf "\r\n"
+
+    if [ "$code" = "200 OK" ] && [ -f "$file" ]; then
+        cat "$file"
+    fi
+}
+
+http_server() {
+    while true; do
+        # 监听 80 端口
+        nc -l -p 80 -q 1 2>/dev/null | while read -r line; do
+            method=$(echo "$line" | awk '{print $1}')
+            path=$(echo "$line" | awk '{print $2}')
+            [ -z "$path" ] && continue
+
+            # 去掉查询参数
+            path="${path%%\?*}"
+            [ "$path" = "/" ] && path="/index.html"
+
+            local_file="/www$path"
+
+            # 检查 HTTP 方法
+            case "$method" in
+                GET)
+                    if [ -f "$local_file" ]; then
+                        case "$local_file" in
+                            *.html|*.htm) send_response "$local_file" "200 OK" "text/html" ;;
+                            *.css)        send_response "$local_file" "200 OK" "text/css" ;;
+                            *.js)         send_response "$local_file" "200 OK" "text/javascript" ;;
+                            *.png)        send_response "$local_file" "200 OK" "image/png" ;;
+                            *.jpg|*.jpeg) send_response "$local_file" "200 OK" "image/jpeg" ;;
+                            *.svg)        send_response "$local_file" "200 OK" "image/svg+xml" ;;
+                            *.json)       send_response "$local_file" "200 OK" "application/json" ;;
+                            *)            send_response "$local_file" "200 OK" "text/plain" ;;
+                        esac
+                    else
+                        printf "HTTP/1.0 404 Not Found\r\n\r\n<html><body><h1>404 Not Found</h1></body></html>\r\n"
+                    fi
+                    ;;
+                *)
+                    printf "HTTP/1.0 501 Not Implemented\r\n\r\n"
+                    ;;
+            esac
+        done
+        sleep 1
+    done
+}
+
+http_server
+WEBSRV
+
+chmod +x /sbin/webui.sh
+/sbin/webui.sh &
+echo "  Web UI: http://192.168.2.1 (shell based)"

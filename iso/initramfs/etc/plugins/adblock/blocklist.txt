@@ -1,0 +1,45 @@
+# AdBlock 广告域名黑名单
+# 每行一个域名，添加到此处后 dnsmasq 将返回 0.0.0.0
+# 内置常用列表:
+
+# 广告网络
+doubleclick.net
+googlesyndication.com
+googleadservices.com
+googleadsserving.com
+adservice.google.com
+adserver.adtechus.com
+adserver.yahoo.com
+advertising.com
+adnxs.com
+adsrvr.org
+adzerk.net
+popads.net
+exoclick.com
+propellerads.com
+adsterra.com
+trafficfactory.biz
+pushnative.com
+adcash.com
+adf.ly
+adfly.io
+
+# 统计追踪
+google-analytics.com
+googletagmanager.com
+facebook.com/tr
+pixel.quantserve.com
+scorecardresearch.com
+hotjar.com
+mouseflow.com
+crazyegg.com
+clicky.com
+statcounter.com
+
+# 其他
+doubleverify.com
+moatads.com
+outbrain.com
+taboola.com
+revcontent.com
+mgid.com

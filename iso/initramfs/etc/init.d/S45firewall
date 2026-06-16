@@ -1,0 +1,108 @@
+#!/bin/sh
+# ============================================================
+#  防火墙 & NAT 配置
+#  提供 MASQUERADE (IP 伪装) 让 LAN 设备共享上网
+# ============================================================
+
+echo "Configuring firewall and NAT..."
+
+# 读取接口名
+WAN_IFACE=$(cat /var/run/wan_iface 2>/dev/null)
+LAN_IFACE=$(cat /var/run/lan_iface 2>/dev/null)
+
+[ -z "$WAN_IFACE" ] && WAN_IFACE="eth0"
+[ -z "$LAN_IFACE" ] && LAN_IFACE="eth1"
+
+# 尝试 iptables, 否则用 nftables
+IPTABLES_AVAIL=0
+NFTABLES_AVAIL=0
+
+iptables -t nat -L -n 2>/dev/null >/dev/null && IPTABLES_AVAIL=1
+nft list ruleset 2>/dev/null >/dev/null && NFTABLES_AVAIL=1
+
+if [ "$IPTABLES_AVAIL" -eq 1 ]; then
+    echo "  Using iptables"
+
+    # 清除现有规则
+    iptables -t nat -F
+    iptables -t nat -X
+    iptables -t mangle -F
+    iptables -t mangle -X
+    iptables -F
+    iptables -X
+
+    # 默认策略: 允许所有 (简单路由不需要严格限制)
+    iptables -P INPUT ACCEPT
+    iptables -P FORWARD ACCEPT
+    iptables -P OUTPUT ACCEPT
+
+    # NAT: MASQUERADE (IP 伪装)
+    iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE
+
+    # 允许转发流量
+    iptables -A FORWARD -i "$LAN_IFACE" -o "$WAN_IFACE" -j ACCEPT
+    iptables -A FORWARD -i "$WAN_IFACE" -o "$LAN_IFACE" -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    # 允许回环
+    iptables -A INPUT -i lo -j ACCEPT
+
+    # 允许已建立的连接回包
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+    if [ "$WAN_IFACE" = "$LAN_IFACE" ]; then
+        # 单臂路由模式: 一个接口同时做 WAN+LAN
+        # 不从 WAN 侧 DROP 任何流量，否则 LAN 也被阻断
+        echo "  Single-arm mode: $WAN_IFACE is both WAN and LAN"
+    else
+        # 双接口模式: WAN 和 LAN 分开
+        # 允许从 LAN 访问路由器的服务
+        iptables -A INPUT -i "$LAN_IFACE" -j ACCEPT
+
+        # WAN 侧仅允许 SSH 和 Web UI
+        iptables -A INPUT -i "$WAN_IFACE" -p tcp --dport 22 -j ACCEPT
+        iptables -A INPUT -i "$WAN_IFACE" -p tcp --dport 80 -j ACCEPT
+        iptables -A INPUT -i "$WAN_IFACE" -j DROP
+    fi
+
+    echo "  NAT enabled on $WAN_IFACE"
+
+elif [ "$NFTABLES_AVAIL" -eq 1 ]; then
+    echo "  Using nftables"
+
+    nft flush ruleset
+
+    nft add table nat
+    nft add chain nat prerouting { type nat hook prerouting priority 0\; }
+    nft add chain nat postrouting { type nat hook postrouting priority 100\; }
+    nft add rule nat postrouting oif "$WAN_IFACE" masquerade
+
+    nft add table filter
+    nft add chain filter input { type filter hook input priority 0\; }
+    nft add chain filter forward { type filter hook forward priority 0\; }
+    nft add chain filter output { type filter hook output priority 0\; }
+
+    nft add rule filter input iif lo accept
+    nft add rule filter input ct state established,related accept
+    if [ "$WAN_IFACE" != "$LAN_IFACE" ]; then
+        nft add rule filter input iif "$LAN_IFACE" accept
+        nft add rule filter input iif "$WAN_IFACE" tcp dport { 22, 80 } accept
+        nft add rule filter input iif "$WAN_IFACE" drop
+    fi
+
+    nft add rule filter forward iif "$LAN_IFACE" oif "$WAN_IFACE" accept
+    nft add rule filter forward iif "$WAN_IFACE" oif "$LAN_IFACE" ct state established,related accept
+
+    echo "  nftables NAT enabled on $WAN_IFACE"
+else
+    echo "  [WARN] No firewall tool found (iptables/nftables). NAT not configured."
+    echo "  [WARN] LAN clients may not reach the internet."
+fi
+
+# 系统优化
+echo 1024 > /proc/sys/net/ipv4/neigh/default/gc_thresh1 2>/dev/null
+echo 2048 > /proc/sys/net/ipv4/neigh/default/gc_thresh2 2>/dev/null
+echo 4096 > /proc/sys/net/ipv4/neigh/default/gc_thresh3 2>/dev/null
+echo 300 > /proc/sys/net/ipv4/tcp_keepalive_time 2>/dev/null
+echo 1 > /proc/sys/net/ipv4/tcp_syncookies 2>/dev/null
+
+echo "  Firewall/NAT configuration complete"

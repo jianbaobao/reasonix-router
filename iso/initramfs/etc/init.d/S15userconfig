@@ -1,0 +1,19 @@
+#!/bin/sh
+# ============================================================
+#  用户配置加载
+#  启动时加载之前通过 Web UI 保存的配置
+# ============================================================
+
+echo "Loading user configuration..."
+
+# 创建配置文件目录
+mkdir -p /etc/config 2>/dev/null
+mkdir -p /var/lib/misc 2>/dev/null
+
+# 端口转发配置
+if [ -f /etc/config/portforward.conf ]; then
+    echo "  Applying port forwarding rules..."
+    . /etc/config/portforward.conf
+fi
+
+echo "  User configuration loaded"

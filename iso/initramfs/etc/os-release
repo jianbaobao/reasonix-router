@@ -1,0 +1,8 @@
+NAME="Reasonix Router"
+VERSION="1.0"
+ID=reasonix-router
+VERSION_ID=1.0
+PRETTY_NAME="Reasonix Router v1.0"
+HOME_URL="https://github.com/reasonix-router"
+SUPPORT_URL="https://github.com/reasonix-router"
+BUG_REPORT_URL="https://github.com/reasonix-router"

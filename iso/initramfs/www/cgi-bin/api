@@ -1,0 +1,615 @@
+#!/bin/sh
+# ============================================================
+#  Reasonix Router - API 后端 v3
+#  修复: POST参数Bug / CORS / 统一格式 / 输入验证 / 新端点
+# ============================================================
+
+# CORS + JSON 头
+echo "Access-Control-Allow-Origin: *"
+echo "Access-Control-Allow-Methods: GET, POST, OPTIONS"
+echo "Access-Control-Allow-Headers: Content-Type"
+echo "Content-Type: application/json; charset=utf-8"
+echo ""
+[ "$REQUEST_METHOD" = "OPTIONS" ] && echo '{"ok":true}' && exit 0
+
+# ─── 请求解析 ──────────────────────────────────────────────
+if echo "$QUERY_STRING" | grep -q 'path='; then
+    REQUEST_PATH="${QUERY_STRING#*path=}"
+    REQUEST_PATH="${REQUEST_PATH%%&*}"
+    REQUEST_PATH=$(echo "$REQUEST_PATH" | sed 's/%2F/\//g; s/%20/ /g')
+else
+    REQUEST_PATH="${PATH_INFO:-/}"
+    REQUEST_PATH="${REQUEST_PATH#/}"
+    REQUEST_PATH="${REQUEST_PATH#api/}"
+fi
+HTTP_METHOD="${REQUEST_METHOD:-GET}"
+
+# ★ 关键修复: 一次性读完 stdin, 缓存 POST body
+POST_DATA=""
+if [ "$HTTP_METHOD" = "POST" ] && [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null; then
+    POST_DATA=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+fi
+
+# ─── 工具函数 ──────────────────────────────────────────────
+json_escape() { echo "$1" | sed 's/"/\\"/g' | tr '\n' ' ' | sed 's/  / /g; s/\t/ /g'; }
+
+# ★ 从缓存 POST_DATA 解析 (不再重复读 stdin)
+read_post_param() {
+    echo "$POST_DATA" | sed 's/&/\n/g' | grep "^${1}=" | head -1 | cut -d= -f2- | sed 's/+/ /g'
+}
+
+validate_numeric() {
+    case "$2" in ''|*[!0-9]*) echo "{\"ok\":false,\"error\":\"'$1' must be a number\"}"; exit 0;; esac
+}
+validate_not_empty() {
+    [ -z "$2" ] && echo "{\"ok\":false,\"error\":\"'$1' required\"}" && exit 0
+}
+
+# 生成 dnsmasq 配置 (避免重复)
+gen_dnsmasq_conf() {
+    local lan="${1:-eth1}" out="${2:-/tmp/dnsmasq.conf}"
+    {
+        echo "interface=$lan"; echo "bind-interfaces"
+        echo "dhcp-range=192.168.2.100,192.168.2.200,255.255.255.0,12h"
+        echo "dhcp-option=3,192.168.2.1"; echo "dhcp-option=6,192.168.2.1"
+        echo "dhcp-authoritative"; echo "domain-needed"; echo "bogus-priv"
+        echo "no-resolv"; echo "server=114.114.114.114"; echo "server=8.8.8.8"
+        echo "cache-size=500"; echo "local=/router/"; echo "address=/router/192.168.2.1"
+        echo "dhcp-leasefile=/var/lib/misc/dnsmasq.leases"
+        echo "conf-file=/tmp/adblock.conf"
+        echo "log-dhcp"; echo "log-facility=/var/log/dnsmasq.log"
+        [ -f /etc/config/dhcp-hosts.conf ] && cat /etc/config/dhcp-hosts.conf
+    } > "$out"
+}
+
+# 列出接口 (公共函数)
+list_ifaces_json() {
+    local out="" include_lo="${1:-0}"
+    for d in /sys/class/net/*/; do
+        [ -d "$d" ] || continue; n=$(basename "$d")
+        [ "$n" = "lo" ] && [ "$include_lo" = "0" ] && continue
+        a=$(cat "${d}address" 2>/dev/null | tr -d '\n')
+        o=$(cat "${d}operstate" 2>/dev/null | tr -d '\n')
+        s=$(cat "${d}speed" 2>/dev/null | tr -d '\n'); [ -z "$s" ] && s=0
+        ip=$(ip -4 addr show "$n" 2>/dev/null | grep 'inet ' | head -1 | awk '{print $2}' | cut -d/ -f1)
+        [ -z "$ip" ] && ip="-"; up="false"; [ "$o" = "up" ] && up="true"
+        out="${out}{\"name\":\"$n\",\"ip\":\"$ip\",\"mac\":\"$a\",\"up\":$up,\"speed\":$s},"
+    done
+    echo "[${out%%,}]"
+}
+
+# ─── 路由分发 ──────────────────────────────────────────────
+case "$REQUEST_PATH" in
+
+    # ======================== 系统 ========================
+    status|api/status)
+        u=$(cat /proc/uptime 2>/dev/null | awk '{print $1}')
+        days=$(echo "$u/86400" | bc 2>/dev/null); hrs=$(echo "($u%86400)/3600"|bc 2>/dev/null)
+        mins=$(echo "($u%3600)/60"|bc 2>/dev/null)
+        mtotal=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+        mfree=$(grep MemFree /proc/meminfo 2>/dev/null | awk '{print $2}')
+        load=$(cat /proc/loadavg 2>/dev/null | awk '{print $1","$2","$3}')
+        echo "{\"ok\":true,\"uptime\":\"${days:-0}d ${hrs:-0}h ${mins:-0}m\",\"memory_kb\":$mtotal,\"free_kb\":$mfree,\"load\":[$load]}"
+        ;;
+
+    uptime)
+        u=$(cat /proc/uptime 2>/dev/null | awk '{print $1}')
+        d=$(echo "$u/86400"|bc 2>/dev/null); h=$(echo "($u%86400)/3600"|bc 2>/dev/null); m=$(echo "($u%3600)/60"|bc 2>/dev/null)
+        echo "{\"uptime\":\"${d:-0}d ${h:-0}h ${m:-0}m\"}"
+        ;;
+
+    memory)
+        t=$(grep MemTotal /proc/meminfo 2>/dev/null|awk '{print $2}')
+        f=$(grep MemFree /proc/meminfo 2>/dev/null|awk '{print $2}')
+        b=$(grep Buffers /proc/meminfo 2>/dev/null|awk '{print $2}')
+        c=$(grep Cached /proc/meminfo 2>/dev/null|awk '{print $2}')
+        [ -n "$t" ] && echo "{\"total\":$t,\"used\":$((t-f-b-c)),\"free\":$f}" || echo '{"error":"Cannot read"}'
+        ;;
+
+    loadavg)
+        echo "{\"loadavg\":\"$(cat /proc/loadavg 2>/dev/null | awk '{print $1,$2,$3}')\"}"
+        ;;
+
+    sysinfo)
+        echo "{\"info\":\"Hostname: $(hostname)\\nKernel: $(uname -r)\\nArch: $(uname -m)\\nUptime: $(cat /proc/uptime|awk '{printf \"%ds\",$1}')\\nProcesses: $(ps 2>/dev/null|wc -l)\"}"
+        ;;
+
+    # ======================== 接口 ========================
+    interfaces)
+        out=""
+        for d in /sys/class/net/*/; do
+            [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = "lo" ] && continue
+            a=$(cat ${d}address 2>/dev/null|tr -d '\n')
+            o=$(cat ${d}operstate 2>/dev/null|tr -d '\n')
+            s=$(cat ${d}speed 2>/dev/null|tr -d '\n'); [ -z "$s" ] && s=0
+            dup=$(cat ${d}duplex 2>/dev/null|tr -d '\n'); [ -z "$dup" ] && dup="unknown"
+            mtu=$(cat ${d}mtu 2>/dev/null|tr -d '\n'); [ -z "$mtu" ] && mtu=1500
+            car=$(cat ${d}carrier 2>/dev/null|tr -d '\n')
+            ip=$(ip -4 addr show "$n" 2>/dev/null|grep 'inet '|head -1|awk '{print $2}'|cut -d/ -f1)
+            [ -z "$ip" ] && ip="-"; up="false"; [ "$o" = "up" ] && up="true"
+            for stat in rx_bytes tx_bytes rx_packets tx_packets rx_errors tx_errors rx_dropped tx_dropped; do
+                eval "${stat}=\$(cat ${d}statistics/${stat} 2>/dev/null|tr -d '\n')"
+                eval "[ -z \"\$${stat}\" ] && ${stat}=0"
+            done
+            out="${out}{\"name\":\"$n\",\"ip\":\"$ip\",\"mac\":\"$a\",\"up\":$up,\"speed\":$s,\"duplex\":\"$dup\",\"mtu\":$mtu,\"carrier\":\"$car\",\"rx_bytes\":$rx_bytes,\"tx_bytes\":$tx_bytes,\"rx_packets\":$rx_packets,\"tx_packets\":$tx_packets,\"rx_errors\":$rx_errors,\"tx_errors\":$tx_errors,\"rx_dropped\":$rx_dropped,\"tx_dropped\":$tx_dropped},"
+        done
+        echo "{\"interfaces\":[${out%%,}]}"
+        ;;
+
+    interfaces-scan)
+        for d in /sys/class/net/*/; do
+            [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = "lo" ] && continue
+            o=$(cat ${d}operstate 2>/dev/null); [ "$o" != "up" ] && ip link set "$n" up 2>/dev/null
+        done
+        sleep 1
+        out=""
+        for d in /sys/class/net/*/; do
+            [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = "lo" ] && continue
+            o=$(cat ${d}operstate 2>/dev/null|tr -d '\n')
+            s=$(cat ${d}speed 2>/dev/null|tr -d '\n'); [ -z "$s" ] && s=0
+            ip=$(ip -4 addr show "$n" 2>/dev/null|grep 'inet '|head -1|awk '{print $2}'|cut -d/ -f1)
+            [ -z "$ip" ] && ip="-"; up="false"; [ "$o" = "up" ] && up="true"
+            out="${out}{\"name\":\"$n\",\"ip\":\"$ip\",\"up\":$up,\"speed\":$s},"
+        done
+        echo "{\"scan_complete\":true,\"interfaces\":[${out%%,}]}"
+        ;;
+
+    # ======================== 路由/NAT ========================
+    route)     echo "{\"route\":\"$(json_escape "$(ip route show 2>/dev/null)")\"}" ;;
+    nat)       echo "{\"nat\":\"$(json_escape "$(iptables -t nat -L -n 2>/dev/null || nft list ruleset 2>/dev/null || echo 'N/A')")\"}" ;;
+
+    # ======================== DHCP 租约 ========================
+    dhcp-leases)
+        leases=""; statics=""
+        [ -f /var/lib/misc/dnsmasq.leases ] && leases=$(cat /var/lib/misc/dnsmasq.leases 2>/dev/null | while read e m i h r; do
+            [ -z "$m" ] && continue
+            now=$(date +%s 2>/dev/null); rem=$((e - now))
+            [ "$rem" -lt 0 ] && continue
+            [ "$rem" -gt 86400 ] && rs=">24h" || rs="${rem}s"
+            echo "{\"mac\":\"$m\",\"ip\":\"$i\",\"hostname\":\"$h\",\"remaining\":\"$rs\"},"
+        done)
+        [ -f /etc/config/dhcp-hosts.conf ] && while IFS= read -r line; do
+            case "$line" in dhcp-host=*)
+                e=$(echo "$line"|sed 's/^dhcp-host=//'); m="${e%%,*}"; r="${e#*,}"; i="${r%%,*}"; n="${r#*,}"
+                statics="${statics}{\"mac\":\"$m\",\"ip\":\"$i\",\"hostname\":\"$n\"},"
+            ;; esac
+        done < /etc/config/dhcp-hosts.conf
+        echo "{\"leases\":[${leases%%,}],\"static\":[${statics%%,}]}"
+        ;;
+
+    # ======================== 端口转发 (修复POST参数) ========================
+    portforward)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            _action=$(read_post_param "action")
+            _proto=$(read_post_param "proto"); [ -z "$_proto" ] && _proto="tcp"
+            _wan_port=$(read_post_param "wan_port")
+            _lan_ip=$(read_post_param "lan_ip")
+            _lan_port=$(read_post_param "lan_port")
+            _idx=$(read_post_param "idx")
+            WAN_IFACE=$(cat /var/run/wan_iface 2>/dev/null || echo "eth0")
+
+            if [ "$_action" = "add" ]; then
+                validate_numeric "wan_port" "$_wan_port"
+                validate_numeric "lan_port" "$_lan_port"
+                validate_not_empty "lan_ip" "$_lan_ip"
+                iptables -t nat -A PREROUTING -i "$WAN_IFACE" -p "$_proto" --dport "$_wan_port" -j DNAT --to-destination "${_lan_ip}:${_lan_port}" 2>/dev/null
+                iptables -A FORWARD -p "$_proto" -d "$_lan_ip" --dport "$_lan_port" -j ACCEPT 2>/dev/null
+                echo "iptables -t nat -A PREROUTING -i $WAN_IFACE -p $_proto --dport $_wan_port -j DNAT --to-destination ${_lan_ip}:${_lan_port}" >> /etc/config/portforward.conf
+                echo "iptables -A FORWARD -p $_proto -d $_lan_ip --dport $_lan_port -j ACCEPT" >> /etc/config/portforward.conf
+                echo "{\"ok\":true,\"message\":\"Forward $_wan_port -> $_lan_ip:$_lan_port\"}"
+            elif [ "$_action" = "delete" ] && [ -n "$_idx" ]; then
+                tmpf="/tmp/pf_new.conf"; > "$tmpf"
+                iptables -t nat -F PREROUTING 2>/dev/null; iptables -F 2>/dev/null
+                cur=0
+                [ -f /etc/config/portforward.conf ] && while IFS= read -r l; do
+                    [ -z "$l" ] && continue; cur=$((cur+1)); [ "$cur" -eq "$_idx" ] && continue
+                    echo "$l" >> "$tmpf"; eval "$l" 2>/dev/null
+                done < /etc/config/portforward.conf
+                cp "$tmpf" /etc/config/portforward.conf
+                iptables -t nat -A POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null
+                echo "{\"ok\":true,\"message\":\"Forward deleted\"}"
+            else
+                echo "{\"ok\":false,\"error\":\"Missing or invalid parameters\"}"
+            fi
+        else
+            rules=""; count=0
+            [ -f /etc/config/portforward.conf ] && while IFS= read -r l; do
+                [ -z "$l" ] && continue; count=$((count+1))
+                p=$(echo "$l"|grep -o '\--dport [0-9]*'|awk '{print $2}')
+                pr=$(echo "$l"|grep -o '\-p [a-z]*'|awk '{print $2}')
+                d=$(echo "$l"|grep -o '\--to-destination [^ ]*'|awk '{print $2}')
+                lip="${d%:*}"; lp="${d#*:}"
+                rules="${rules}{\"idx\":$count,\"proto\":\"$pr\",\"wan_port\":$p,\"lan_ip\":\"$lip\",\"lan_port\":$lp},"
+            done < /etc/config/portforward.conf
+            echo "{\"rules\":[${rules%%,}]}"
+        fi
+        ;;
+
+    # ======================== 静态 DHCP (修复POST参数) ========================
+    dhcp-hosts)
+        CFG="/etc/config/dhcp-hosts.conf"
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            _action=$(read_post_param "action")
+            _mac=$(read_post_param "mac"|tr 'A-Z' 'a-z')
+            _ip=$(read_post_param "ip")
+            _hostname=$(read_post_param "hostname")
+            _idx=$(read_post_param "idx")
+            LAN_IFACE=$(cat /var/run/lan_iface 2>/dev/null || echo "eth1")
+
+            restart_dnsmasq() {
+                killall dnsmasq 2>/dev/null; sleep 1
+                gen_dnsmasq_conf "$LAN_IFACE"
+                dnsmasq -C /tmp/dnsmasq.conf --pid-file=/var/run/dnsmasq.pid 2>/dev/null
+            }
+
+            if [ "$_action" = "add" ]; then
+                validate_not_empty "mac" "$_mac"; validate_not_empty "ip" "$_ip"
+                echo "dhcp-host=$_mac,$_ip${_hostname:+,$_hostname}" >> "$CFG"
+                restart_dnsmasq
+                echo "{\"ok\":true,\"message\":\"$_mac -> $_ip\"}"
+            elif [ "$_action" = "delete" ] && [ -n "$_idx" ]; then
+                tmpf="/tmp/dhcp_new.conf"; > "$tmpf"; cur=0
+                [ -f "$CFG" ] && while IFS= read -r l; do
+                    [ -z "$l" ] && continue; cur=$((cur+1)); [ "$cur" -eq "$_idx" ] && continue
+                    echo "$l" >> "$tmpf"
+                done < "$CFG"
+                cp "$tmpf" "$CFG"; restart_dnsmasq
+                echo "{\"ok\":true,\"message\":\"Deleted\"}"
+            else
+                echo "{\"ok\":false,\"error\":\"Missing parameters\"}"
+            fi
+        else
+            list=""; count=0
+            [ -f "$CFG" ] && while IFS= read -r l; do
+                [ -z "$l" ] && continue; count=$((count+1))
+                e=$(echo "$l"|sed 's/^dhcp-host=//'); m="${e%%,*}"; r="${e#*,}"; i="${r%%,*}"; n="${r#*,}"
+                list="${list}{\"idx\":$count,\"mac\":\"$m\",\"ip\":\"$i\",\"hostname\":\"$n\"},"
+            done < "$CFG"
+            echo "{\"hosts\":[${list%%,}]}"
+        fi
+        ;;
+
+    # ======================== DHCP 配置 ========================
+    dhcp/config)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            _range_start=$(read_post_param "range_start"); _range_end=$(read_post_param "range_end")
+            _lease=$(read_post_param "lease"); _gateway=$(read_post_param "gateway")
+            _dns1=$(read_post_param "dns1"); _dns2=$(read_post_param "dns2")
+            # 保存到配置文件
+            echo "DHCP_RANGE_START=\"$_range_start\"" > /etc/config/dhcp-options
+            echo "DHCP_RANGE_END=\"$_range_end\"" >> /etc/config/dhcp-options
+            echo "DHCP_LEASE=\"$_lease\"" >> /etc/config/dhcp-options
+            echo "DHCP_GATEWAY=\"$_gateway\"" >> /etc/config/dhcp-options
+            echo "DHCP_DNS1=\"$_dns1\"" >> /etc/config/dhcp-options
+            echo "DHCP_DNS2=\"$_dns2\"" >> /etc/config/dhcp-options
+            echo "{\"ok\":true,\"message\":\"DHCP config saved\"}"
+        else
+            [ -f /etc/config/dhcp-options ] && . /etc/config/dhcp-options
+            echo "{\"range_start\":\"${DHCP_RANGE_START:-192.168.2.100}\",\"range_end\":\"${DHCP_RANGE_END:-192.168.2.200}\",\"lease\":\"${DHCP_LEASE:-12h}\",\"gateway\":\"${DHCP_GATEWAY:-192.168.2.1}\",\"dns1\":\"${DHCP_DNS1:-114.114.114.114}\",\"dns2\":\"${DHCP_DNS2:-8.8.8.8}\"}"
+        fi
+        ;;
+
+    # ======================== 接口角色 (修复POST参数) ========================
+    interface-roles)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            _wan=$(read_post_param "wan"|sed 's/[^a-zA-Z0-9_]//g')
+            _lan=$(read_post_param "lan"|sed 's/[^a-zA-Z0-9_]//g')
+            [ ! -d "/sys/class/net/$_wan" ] && echo "{\"ok\":false,\"error\":\"Invalid WAN interface\"}" && exit 0
+            [ ! -d "/sys/class/net/$_lan" ] && echo "{\"ok\":false,\"error\":\"Invalid LAN interface\"}" && exit 0
+            [ "$_wan" = "$_lan" ] && echo "{\"ok\":false,\"error\":\"WAN and LAN must differ\"}" && exit 0
+            echo "WAN_IFACE=\"$_wan\"" > /etc/config/network-roles
+            echo "LAN_IFACE=\"$_lan\"" >> /etc/config/network-roles
+            /etc/init.d/S40network 2>/dev/null; /etc/init.d/S45firewall 2>/dev/null; /etc/init.d/S50dhcp 2>/dev/null
+            echo "{\"ok\":true,\"message\":\"WAN=$_wan, LAN=$_lan\"}"
+        else
+            . /etc/config/network-roles 2>/dev/null
+            av=""; for d in /sys/class/net/*/; do
+                [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = "lo" ] && continue
+                av="${av}{\"name\":\"$n\",\"mac\":\"$(cat ${d}address 2>/dev/null|tr -d '\n')\"},"
+            done
+            echo "{\"wan\":\"${WAN_IFACE:-auto}\",\"lan\":\"${LAN_IFACE:-auto}\",\"available\":[${av%%,}]}"
+        fi
+        ;;
+
+    # ======================== 系统配置 ========================
+    system/hostname)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            h=$(read_post_param "hostname"|sed 's/[^a-zA-Z0-9._-]//g')
+            validate_not_empty "hostname" "$h"
+            echo "$h" > /etc/hostname; hostname -F /etc/hostname 2>/dev/null
+            echo "{\"ok\":true,\"hostname\":\"$h\"}"
+        else
+            echo "{\"hostname\":\"$(hostname 2>/dev/null)\"}"
+        fi
+        ;;
+
+    system/time)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            tz=$(read_post_param "timezone"|sed 's/[^a-zA-Z0-9_\/-]//g')
+            [ -n "$tz" ] && echo "$tz" > /etc/timezone 2>/dev/null && ln -sf "/usr/share/zoneinfo/$tz" /etc/localtime 2>/dev/null
+            echo "{\"ok\":true,\"timezone\":\"${tz:-UTC}\"}"
+        else
+            echo "{\"timezone\":\"$(cat /etc/timezone 2>/dev/null || echo UTC)\",\"uptime_seconds\":$(cat /proc/uptime 2>/dev/null|awk '{print $1}'|cut -d. -f1)}"
+        fi
+        ;;
+
+    # ======================== 日志 ========================
+    log)
+        f=$(echo "$QUERY_STRING"|grep -o 'filter=[^&]*'|cut -d= -f2|sed 's/%20/ /g')
+        l=$(echo "$QUERY_STRING"|grep -o 'lines=[^&]*'|cut -d= -f2); [ -z "$l" ] && l=50
+        logs=""
+        [ -f /var/log/dnsmasq.log ] && logs="$logs\n=== DNSMASQ ===\n$(if [ -n \"$f\" ]; then grep -i "$f" /var/log/dnsmasq.log; else tail -$l /var/log/dnsmasq.log; fi 2>/dev/null)"
+        logs="$logs\n=== KERNEL ===\n$(if [ -n \"$f\" ]; then dmesg 2>/dev/null|grep -i "$f"; else dmesg 2>/dev/null|tail -$l; fi)"
+        echo "{\"log\":\"$(json_escape "$logs")\",\"filter\":\"$f\"}"
+        ;;
+
+    # ======================== Ping ========================
+    ping)
+        [ "$HTTP_METHOD" != "POST" ] && echo '{"ok":false,"error":"POST required"}' && exit 0
+        t=$(read_post_param "target"|sed 's/[^a-zA-Z0-9.:-]//g')
+        c=$(read_post_param "count"); [ -z "$c" ] && c=4
+        validate_not_empty "target" "$t"
+        r=$(ping -c "$c" -W 3 "$t" 2>&1)
+        echo "{\"result\":\"$(json_escape "$r")\",\"target\":\"$t\"}"
+        ;;
+
+    # ======================== 重启/关机 ========================
+    reboot)   [ "$HTTP_METHOD" != "POST" ] && echo '{"ok":false,"error":"POST required"}' || (echo '{"ok":true,"message":"Rebooting"}'; sleep 1; reboot -f)& ;;
+    poweroff) [ "$HTTP_METHOD" != "POST" ] && echo '{"ok":false,"error":"POST required"}' || (echo '{"ok":true,"message":"Shutting down"}'; sleep 1; poweroff -f)& ;;
+
+    # ======================== 网络重启 ========================
+    network/restart)
+        /etc/init.d/S40network 2>/dev/null; /etc/init.d/S45firewall 2>/dev/null; /etc/init.d/S50dhcp 2>/dev/null
+        echo '{"ok":true,"message":"Network restarted"}'
+        ;;
+
+    network/dhcp-release)
+        WAN_IFACE=$(cat /var/run/wan_iface 2>/dev/null || echo "eth0")
+        udhcpc -i "$WAN_IFACE" -R 2>/dev/null &
+        echo '{"ok":true,"message":"DHCP released"}'
+        ;;
+
+    # ======================== 在线客户端 ========================
+    clients)
+        clients=""
+        # 从 ARP 表获取
+        arp -n 2>/dev/null | tail -n +2 | while read ip hw type iface; do
+            [ "$hw" = "(incomplete)" ] && continue
+            clients="${clients}{\"ip\":\"$ip\",\"mac\":\"$hw\",\"iface\":\"$iface\"},"
+        done
+        # 也读 DHCP 租约获取主机名
+        echo "{\"clients\":[${clients%%,}]}"
+        ;;
+
+    # ======================== 流量统计 ========================
+    stats/traffic)
+        out=""
+        for d in /sys/class/net/*/; do
+            [ -d "$d" ] || continue; n=$(basename "$d"); [ "$n" = "lo" ] && continue
+            rx=$(cat ${d}statistics/rx_bytes 2>/dev/null); tx=$(cat ${d}statistics/tx_bytes 2>/dev/null)
+            [ -z "$rx" ] && rx=0; [ -z "$tx" ] && tx=0
+            out="${out}{\"iface\":\"$n\",\"rx_bytes\":$rx,\"tx_bytes\":$tx},"
+        done
+        echo "{\"traffic\":[${out%%,}]}"
+        ;;
+
+    # ======================== 操作 (兼容) ========================
+    action/*)
+        [ "$HTTP_METHOD" != "POST" ] && echo '{"ok":false,"error":"POST required"}' && exit 0
+        ACT="${REQUEST_PATH#action/}"
+        case "$ACT" in
+            restart-dhcp)   killall dnsmasq 2>/dev/null; sleep 1; LAN_IFACE=$(cat /var/run/lan_iface 2>/dev/null||echo "eth1"); gen_dnsmasq_conf "$LAN_IFACE"; dnsmasq -C /tmp/dnsmasq.conf --pid-file=/var/run/dnsmasq.pid 2>/dev/null; echo '{"ok":true,"message":"DHCP restarted"}' ;;
+            flush-conntrack) echo f > /proc/net/nf_conntrack 2>/dev/null; echo '{"ok":true,"message":"Conntrack flushed"}' ;;
+            restart-network) /etc/init.d/S40network 2>/dev/null; /etc/init.d/S45firewall 2>/dev/null; /etc/init.d/S50dhcp 2>/dev/null; echo '{"ok":true,"message":"Network restarted"}' ;;
+            *) echo '{"ok":false,"error":"Unknown action"}' ;;
+        esac
+        ;;
+
+    # ======================== 插件 ========================
+    plugins)
+        list=""
+        for p in /etc/plugins/*/; do
+            [ -d "$p" ] || continue; n=$(basename "$p"); e="false"; [ -f "${p}enable" ] && e="true"
+            d=""; v=""; [ -f "${p}plugin.conf" ] && . "${p}plugin.conf"
+            [ -z "$PLUGIN_DESC" ] && PLUGIN_DESC="$n"; [ -z "$PLUGIN_VERSION" ] && PLUGIN_VERSION="1.0"
+            list="${list}{\"name\":\"$n\",\"desc\":\"$PLUGIN_DESC\",\"version\":\"$PLUGIN_VERSION\",\"enabled\":$e},"
+        done
+        echo "{\"plugins\":[${list%%,}]}"
+        ;;
+
+    plugin/*)
+        _a="${REQUEST_PATH#plugin/}"; _action="${_a%%/ *}"; _pname="${_a#*/}"
+        case "$_action" in
+            enable|disable)
+                [ "$_action" = "enable" ] && touch "/etc/plugins/$_pname/enable" 2>/dev/null || rm -f "/etc/plugins/$_pname/enable" 2>/dev/null
+                echo "{\"ok\":true,\"message\":\"$_pname $_action\"}" ;;
+            ddns-config)
+                if [ "$HTTP_METHOD" = "POST" ]; then
+                    d=$(read_post_param "domain"); t=$(read_post_param "token")
+                    echo "DUCKDNS_DOMAIN=\"$d\"" > /etc/plugins/ddns/ddns.conf
+                    echo "DUCKDNS_TOKEN=\"$t\"" >> /etc/plugins/ddns/ddns.conf
+                    /etc/plugins/ddns/run.sh update 2>/dev/null &
+                    echo '{"ok":true,"message":"DDNS saved"}'
+                else
+                    . /etc/plugins/ddns/ddns.conf 2>/dev/null
+                    echo "{\"domain\":\"$DUCKDNS_DOMAIN\",\"token\":\"$DUCKDNS_TOKEN\"}"
+                fi ;;
+            ddns-status)
+                lip=""; [ -f /var/run/ddns_last_ip ] && lip=$(cat /var/run/ddns_last_ip)
+                llog=""; [ -f /var/log/ddns.log ] && llog=$(tail -3 /var/log/ddns.log 2>/dev/null|tr '\n' ';')
+                echo "{\"last_ip\":\"$lip\",\"last_log\":\"$(json_escape "$llog")\"}" ;;
+            adblock-status)
+                c=0; [ -f /var/run/adblock_count ] && c=$(cat /var/run/adblock_count)
+                e=0; [ -f /etc/plugins/adblock/blocklist.txt ] && e=$(grep -c -v '^#' /etc/plugins/adblock/blocklist.txt 2>/dev/null||echo 0)
+                echo "{\"blocked\":$c,\"entries\":$e}" ;;
+            adblock-add)
+                d=$(read_post_param "domain"|sed 's/[^a-zA-Z0-9._-]//g')
+                [ -z "$d" ] && echo '{"ok":false,"error":"Invalid domain"}' && exit 0
+                echo "$d" >> /etc/plugins/adblock/blocklist.txt
+                /etc/plugins/adblock/run.sh init 2>/dev/null
+                kill -HUP "$(cat /var/run/dnsmasq.pid 2>/dev/null)" 2>/dev/null
+                echo "{\"ok\":true,\"message\":\"Added $d\"}" ;;
+            adblock-remove)
+                idx=$(read_post_param "idx")
+                tmpf="/tmp/adblock_new.txt"; > "$tmpf"; cur=0
+                while IFS= read -r l; do
+                    [ -z "$l" ] && continue; case "$l" in '#'*) continue;; esac
+                    cur=$((cur+1)); [ "$cur" -eq "$idx" ] && continue; echo "$l" >> "$tmpf"
+                done < /etc/plugins/adblock/blocklist.txt
+                head -9 /etc/plugins/adblock/blocklist.txt > /tmp/header.txt
+                cat /tmp/header.txt > /etc/plugins/adblock/blocklist.txt
+                cat "$tmpf" >> /etc/plugins/adblock/blocklist.txt
+                /etc/plugins/adblock/run.sh init 2>/dev/null
+                kill -HUP "$(cat /var/run/dnsmasq.pid 2>/dev/null)" 2>/dev/null
+                echo '{"ok":true,"message":"Removed"}' ;;
+            *) echo "{\"ok\":false,\"error\":\"Unknown plugin action\"}" ;;
+        esac
+        ;;
+
+    # ======================== 第三方 API ========================
+    geoip)
+        t=$(echo "$QUERY_STRING"|grep -o 'ip=[^&]*'|cut -d= -f2)
+        [ -z "$t" ] && t=$(cat /var/run/ddns_last_ip 2>/dev/null||wget -q -O - "https://api.ipify.org" 2>/dev/null)
+        [ -z "$t" ] && echo '{"ok":false,"error":"Cannot determine IP"}' && exit 0
+        r=$(wget -q -O - "http://ip-api.com/json/${t}?fields=status,country,regionName,city,isp,org,as,lat,lon,timezone,query" 2>/dev/null)
+        [ -n "$r" ] && echo "$r" || echo "{\"error\":\"GeoIP unavailable\",\"ip\":\"$t\"}"
+        ;;
+
+    publicip)
+        r=$(wget -q -O - "https://api.ipify.org?format=json" 2>/dev/null)
+        [ -z "$r" ] && r=$(wget -q -O - "https://checkip.amazonaws.com" 2>/dev/null|tr -d ' \n')
+        [ -n "$r" ] && echo "$r" || echo '{"error":"Cannot detect public IP"}'
+        ;;
+
+    dnslookup)
+        d=$(echo "$QUERY_STRING"|grep -o 'domain=[^&]*'|cut -d= -f2|sed 's/%20//g'|sed 's/[^a-zA-Z0-9._-]//g')
+        t=$(echo "$QUERY_STRING"|grep -o 'type=[^&]*'|cut -d= -f2); [ -z "$t" ] && t="A"
+        [ -z "$d" ] && echo '{"ok":false,"error":"Domain required"}' && exit 0
+        r=$(nslookup -type="$t" "$d" 2>&1)
+        [ -z "$r" ] && r=$(host -t "$t" "$d" 2>&1)
+        [ -z "$r" ] && r=$(wget -q -O - "https://dns.google/resolve?name=${d}&type=${t}" 2>/dev/null)
+        echo "{\"domain\":\"$d\",\"type\":\"$t\",\"result\":\"$(json_escape "$r")\"}"
+        ;;
+
+    # ======================== 插件商店 ========================
+    plugin-available)
+        m=$(wget -q -O - "https://raw.githubusercontent.com/your-repo/router-plugins/main/manifest.json" 2>/dev/null)
+        [ -n "$m" ] && echo "$m" || echo '{"plugins":[{"name":"netutils","desc":"Network Utilities","version":"1.0","url":""}],"source":"offline"}'
+        ;;
+
+    plugin-install)
+        [ "$HTTP_METHOD" != "POST" ] && echo '{"ok":false,"error":"POST required"}' && exit 0
+        n=$(read_post_param "name"|sed 's/[^a-zA-Z0-9._-]//g')
+        u=$(read_post_param "url")
+        validate_not_empty "name" "$n"
+        mkdir -p "/etc/plugins/$n" 2>/dev/null
+        if [ -n "$u" ]; then
+            wget -q -O "/tmp/${n}.tar.gz" "$u" 2>/dev/null
+            [ -f "/tmp/${n}.tar.gz" ] && tar -xzf "/tmp/${n}.tar.gz" -C "/etc/plugins/$n" 2>/dev/null && echo "{\"ok\":true,\"message\":\"$n installed\"}" || echo "{\"ok\":false,\"error\":\"Download failed\"}"
+        else
+            cat > "/etc/plugins/$n/plugin.conf" << EOF
+PLUGIN_NAME="$n"
+PLUGIN_VERSION="1.0"
+PLUGIN_DESC="Placeholder"
+PLUGIN_API_VERSION="1"
+EOF
+            touch "/etc/plugins/$n/enable"
+            echo "{\"ok\":true,\"message\":\"$n created\"}"
+        fi
+        ;;
+
+    # ======================== API 文档 ========================
+    api/docs)
+        echo '{"ok":true,"version":3,"endpoints":['
+        echo '"uptime","memory","loadavg","sysinfo","status",'
+        echo '"interfaces","interfaces-scan","route","nat",'
+        echo '"dhcp-leases","dhcp/config","dhcp-hosts",'
+        echo '"portforward","interface-roles",'
+        echo '"clients","stats/traffic",'
+        echo '"log","ping","dnslookup","geoip","publicip",'
+        echo '"system/hostname","system/time",'
+        echo '"reboot","poweroff","network/restart","network/dhcp-release",'
+        echo '"plugins","plugin/*","plugin-available","plugin-install",'
+        echo '"action/*","api/docs"'
+        echo '],"methods":{"GET":"Read","POST":"Write","OPTIONS":"CORS preflight"}}'
+        ;;
+
+    # ======================== DNS 配置 ========================
+    dns/config)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            _dns1=$(read_post_param "dns1"); [ -z "$_dns1" ] && _dns1="114.114.114.114"
+            _dns2=$(read_post_param "dns2"); [ -z "$_dns2" ] && _dns2="8.8.8.8"
+            _cache=$(read_post_param "cache"); [ -z "$_cache" ] && _cache="500"
+            validate_numeric "cache" "$_cache"
+            # 保存配置
+            echo "DNS1=$_dns1" > /etc/config/dns.conf
+            echo "DNS2=$_dns2" >> /etc/config/dns.conf
+            echo "CACHE=$_cache" >> /etc/config/dns.conf
+            # 重启 dnsmasq
+            killall dnsmasq 2>/dev/null; sleep 1
+            LAN_IFACE=$(cat /var/run/lan_iface 2>/dev/null || echo "eth1")
+            gen_dnsmasq_conf "$LAN_IFACE"
+            dnsmasq -C /tmp/dnsmasq.conf --pid-file=/var/run/dnsmasq.pid 2>/dev/null
+            echo "{\"ok\":true,\"message\":\"DNS config updated\"}"
+        else
+            _dns1="114.114.114.114"; _dns2="8.8.8.8"; _cache="500"
+            [ -f /etc/config/dns.conf ] && . /etc/config/dns.conf
+            echo "{\"ok\":true,\"data\":{\"dns1\":\"$_dns1\",\"dns2\":\"$_dns2\",\"cache\":$_cache}}"
+        fi
+        ;;
+
+    # ======================== 防火墙规则 ========================
+    firewall/rules)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            _action=$(read_post_param "action")
+            _src=$(read_post_param "src")
+            _proto=$(read_post_param "proto"); [ -z "$_proto" ] && _proto="tcp"
+            _port=$(read_post_param "port")
+            _target=$(read_post_param "target"); [ -z "$_target" ] && _target="ACCEPT"
+            if [ "$_action" = "add" ] && [ -n "$_port" ]; then
+                [ -z "$_src" ] && _src="0.0.0.0/0"
+                iptables -A INPUT -s "$_src" -p "$_proto" --dport "$_port" -j "$_target" 2>/dev/null
+                echo "{\"ok\":true,\"message\":\"Rule added: $_proto/$_port $_target\"}"
+            elif [ "$_action" = "flush" ]; then
+                iptables -F INPUT 2>/dev/null
+                echo "{\"ok\":true,\"message\":\"INPUT rules flushed\"}"
+            else
+                echo "{\"ok\":false,\"error\":\"action=add|flush and port required\"}"
+            fi
+        else
+            _rules=$(iptables -L INPUT -n --line-numbers 2>/dev/null || echo "N/A")
+            echo "{\"ok\":true,\"data\":{\"rules\":\"$(json_escape "$_rules")\"}}"
+        fi
+        ;;
+
+    # ======================== 系统备份 ========================
+    system/backup)
+        if [ "$HTTP_METHOD" = "POST" ]; then
+            # 生成配置备份 (tar of /etc/config)
+            _backup="/tmp/reasonix-backup.tar.gz"
+            tar -czf "$_backup" /etc/config /etc/plugins/*/ddns.conf /etc/plugins/*/blocklist.txt 2>/dev/null
+            # 输出 base64
+            _b64=$(base64 < "$_backup" 2>/dev/null | tr -d '\n')
+            echo "{\"ok\":true,\"data\":{\"backup\":\"$_b64\",\"size\":$(stat -c%s '$_backup' 2>/dev/null || echo 0)}}"
+        else
+            echo '{"ok":false,"error":"Use POST to generate backup"}'
+        fi
+        ;;
+
+    # ======================== 恢复出厂 ========================
+    system/factory-reset)
+        if [ "$HTTP_METHOD" != "POST" ]; then
+            echo '{"ok":false,"error":"POST required"}'; exit 0
+        fi
+        # 清除持久化配置
+        rm -f /etc/config/network-roles /etc/config/portforward.conf
+        rm -f /etc/config/dhcp-hosts.conf /etc/config/dns.conf
+        rm -rf /overlay/upper/* 2>/dev/null
+        echo '{"ok":true,"message":"Factory reset. Reboot to apply."}'
+        ;;
+
+    # ======================== 404 ========================
+    *)
+        echo "{\"ok\":false,\"error\":\"Unknown endpoint: $REQUEST_PATH\",\"code\":404}"
+        ;;
+esac

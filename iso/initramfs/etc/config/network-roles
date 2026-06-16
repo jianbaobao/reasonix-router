@@ -1,0 +1,7 @@
+# Reasonix Router - 网络接口角色配置
+# WAN=连接到互联网的接口
+# LAN=连接到内网设备的接口
+# 留空=自动检测 (第一个接口=WAN, 第二个=LAN)
+
+WAN_IFACE=""
+LAN_IFACE=""

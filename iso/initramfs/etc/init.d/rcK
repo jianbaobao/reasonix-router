@@ -1,0 +1,33 @@
+#!/bin/sh
+# ============================================================
+#  rcK — 系统关机脚本 (K = Kill)
+#  停止所有服务、卸载文件系统
+# ============================================================
+
+echo "Shutting down Reasonix Router..."
+
+# 停止 Web UI
+killall busybox httpd 2>/dev/null
+
+# 停止 DHCP/DNS
+killall dnsmasq 2>/dev/null
+
+# 停止 DDNS
+killall ddns 2>/dev/null
+
+# 同步磁盘
+sync
+
+# 卸载 OverlayFS
+if [ -f /var/run/overlay_device ]; then
+    DEVICE=$(cat /var/run/overlay_device)
+    echo "  Syncing persistent storage ($DEVICE)..."
+    sync
+    umount /mnt/root 2>/dev/null
+    umount /overlay/disk 2>/dev/null
+fi
+
+# 卸载所有文件系统
+umount -a -r 2>/dev/null
+
+echo "  System halted."

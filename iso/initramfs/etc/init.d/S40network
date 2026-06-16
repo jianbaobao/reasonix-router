@@ -1,0 +1,81 @@
+#!/bin/sh
+# ============================================================
+#  网络接口配置
+#  拓扑:
+#    WAN (eth0) - DHCP 获取公网 IP
+#    LAN (eth1) - 静态 IP 192.168.2.1/24, 提供 DHCP
+# ============================================================
+
+echo "Configuring network interfaces..."
+
+# 等待 udev 或内核命名接口
+sleep 1
+
+# 读取用户配置的接口角色 (优先)
+if [ -f /etc/config/network-roles ]; then
+    . /etc/config/network-roles
+fi
+
+# 验证配置: WAN 和 LAN 必须都有效, 缺一不可
+CONFIGURED=0
+if [ -n "$WAN_IFACE" ] && [ -n "$LAN_IFACE" ] && \
+   [ -d "/sys/class/net/$WAN_IFACE" ] && [ -d "/sys/class/net/$LAN_IFACE" ]; then
+    CONFIGURED=1
+fi
+
+if [ "$CONFIGURED" -eq 0 ]; then
+    # 自动检测: 扫描可用接口
+    INTERFACES=$(ip link show 2>/dev/null | grep -E "^[0-9]:" | awk -F': ' '{print $2}' | awk '{print $1}' | grep -v lo)
+    ETH_COUNT=0
+    for iface in $INTERFACES; do ETH_COUNT=$((ETH_COUNT + 1)); done
+    echo "  Auto-detected $ETH_COUNT interfaces: $INTERFACES"
+
+    IFACE1=$(echo "$INTERFACES" | head -1)
+    IFACE2=$(echo "$INTERFACES" | tail -1)
+
+    if [ "$ETH_COUNT" -ge 2 ]; then
+        WAN_IFACE="$IFACE1"
+        LAN_IFACE="$IFACE2"
+    elif [ "$ETH_COUNT" -eq 1 ]; then
+        WAN_IFACE="$IFACE1"
+        LAN_IFACE="$IFACE1"
+    else
+        echo "  [ERROR] No network interfaces found!"
+        exit 1
+    fi
+    # 保存自动检测结果供后续脚本使用
+    echo "WAN_IFACE=\"$WAN_IFACE\"" > /etc/config/network-roles
+    echo "LAN_IFACE=\"$LAN_IFACE\"" >> /etc/config/network-roles
+else
+    echo "  Using configured roles: WAN=$WAN_IFACE LAN=$LAN_IFACE"
+fi
+
+echo "  WAN interface: $WAN_IFACE (DHCP client)"
+echo "  LAN interface: $LAN_IFACE (192.168.2.1/24)"
+
+# --- 启用 IP 转发 ---
+echo 1 > /proc/sys/net/ipv4/ip_forward
+echo 0 > /proc/sys/net/ipv4/conf/all/rp_filter 2>/dev/null
+
+# --- 配置 WAN (DHCP 客户端) ---
+ip link set "$WAN_IFACE" up
+# 使用 udhcpc 获取 DHCP 地址
+# -q: 退出后终止 (quit after lease)
+# -t 3: 最多 3 次尝试
+# -T 2: 超时 2 秒
+# -s: dhcp 脚本
+udhcpc -i "$WAN_IFACE" -q -t 3 -T 2 -s /etc/network/dhcp.script 2>&1 &
+echo "  $WAN_IFACE: DHCP client started"
+
+# --- 配置 LAN (静态 IP) ---
+ip link set "$LAN_IFACE" up
+# 先清除已有 IP 再配置，防止重启时重复添加
+ip addr flush dev "$LAN_IFACE" 2>/dev/null
+ip addr add 192.168.2.1/24 dev "$LAN_IFACE"
+echo "  $LAN_IFACE: Static IP 192.168.2.1/24 configured"
+
+# 保存接口名给后续脚本使用
+echo "$WAN_IFACE" > /var/run/wan_iface
+echo "$LAN_IFACE" > /var/run/lan_iface
+
+echo "  Network configuration complete"

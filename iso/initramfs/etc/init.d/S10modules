@@ -1,0 +1,73 @@
+#!/bin/sh
+# ============================================================
+#  内核模块加载 — 支持物理机 + 虚拟机
+#  自动检测硬件并加载对应的驱动
+# ============================================================
+
+echo "Loading hardware drivers..."
+
+# ─── 存储控制器 ────────────────────────────────────────────
+# SATA/AHCI
+modprobe ahci 2>/dev/null && echo "  ahci: OK" || echo "  ahci: skipped"
+modprobe libahci 2>/dev/null
+
+# NVMe
+modprobe nvme 2>/dev/null && echo "  nvme: OK" || echo "  nvme: skipped"
+
+# IDE (旧硬件)
+modprobe ata_piix 2>/dev/null
+modprobe pata_acpi 2>/dev/null
+
+# SCSI / USB 存储
+modprobe sd_mod 2>/dev/null
+modprobe usb-storage 2>/dev/null && echo "  usb-storage: OK"
+modprobe uas 2>/dev/null
+
+# VirtIO (虚拟机)
+modprobe virtio 2>/dev/null
+modprobe virtio_blk 2>/dev/null && echo "  virtio-blk: OK"
+modprobe virtio_scsi 2>/dev/null
+modprobe virtio_net 2>/dev/null && echo "  virtio-net: OK"
+
+# ─── 网卡驱动 ──────────────────────────────────────────────
+# Intel
+modprobe e1000 2>/dev/null && echo "  e1000: OK"
+modprobe e1000e 2>/dev/null && echo "  e1000e: OK"
+modprobe igb 2>/dev/null && echo "  igb: OK"
+modprobe ixgbe 2>/dev/null && echo "  ixgbe: OK (10GbE)"
+modprobe i40e 2>/dev/null && echo "  i40e: OK (40GbE)"
+
+# Realtek
+modprobe r8169 2>/dev/null && echo "  r8169: OK"
+modprobe 8139too 2>/dev/null && echo "  r8139too: OK"
+
+# Broadcom
+modprobe tg3 2>/dev/null && echo "  tg3: OK"
+modprobe bnx2 2>/dev/null && echo "  bnx2: OK"
+
+# VMware
+modprobe vmxnet3 2>/dev/null && echo "  vmxnet3: OK"
+
+# ─── 网络核心 ──────────────────────────────────────────────
+modprobe tun 2>/dev/null && echo "  tun: OK"
+modprobe bonding 2>/dev/null && echo "  bonding: OK"
+modprobe 8021q 2>/dev/null && echo "  8021q: OK (VLAN)"
+modprobe bridge 2>/dev/null
+
+# Netfilter
+for mod in nf_conntrack nf_nat nf_tables nf_conntrack_ipv4 \
+           nf_nat_ipv4 iptable_nat iptable_filter iptable_mangle \
+           ip_tables xt_MASQUERADE xt_tcpudp xt_conntrack xt_state; do
+    modprobe "$mod" 2>/dev/null
+done
+echo "  netfilter: OK"
+
+# ─── 文件系统 ──────────────────────────────────────────────
+modprobe ext4 2>/dev/null
+modprobe btrfs 2>/dev/null
+modprobe xfs 2>/dev/null
+modprobe vfat 2>/dev/null
+modprobe nls_cp437 2>/dev/null
+modprobe nls_iso8859-1 2>/dev/null
+
+echo "  Module loading complete"

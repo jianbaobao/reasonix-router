@@ -1,0 +1,344 @@
+#!/bin/sh
+# ============================================================
+#  Reasonix Router — TUI 系统安装器
+#  纯 shell + ANSI 终端界面, 无外部依赖
+#  用法: installer          # 交互模式
+#        installer /dev/sda # 自动安装到指定磁盘
+# ============================================================
+
+set -e
+
+# ─── ANSI 终端控制 ────────────────────────────────────────
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; WHITE='\033[1;37m'; NC='\033[0m'
+BOLD='\033[1m'; DIM='\033[2m'
+
+clear_screen() { printf '\033[2J\033[H'; }
+cursor_up()    { printf '\033[A'; }
+cursor_down()  { printf '\033[B'; }
+hide_cursor()  { printf '\033[?25l'; }
+show_cursor()  { printf '\033[?25h'; }
+
+# ─── UI 组件 ──────────────────────────────────────────────
+
+draw_header() {
+    local title="${1:-Reasonix Router Installer}"
+    echo ""
+    printf "${CYAN}╔══════════════════════════════════════════╗${NC}\n"
+    printf "${CYAN}║  ${WHITE}${BOLD}%-38s${NC}${CYAN}║${NC}\n" "$title"
+    printf "${CYAN}╚══════════════════════════════════════════╝${NC}\n"
+    echo ""
+}
+
+draw_progress() {
+    local step=$1 total=$2 msg=$3
+    local pct=$((step * 100 / total))
+    local bar_len=30
+    local filled=$((pct * bar_len / 100))
+    local empty=$((bar_len - filled))
+    printf "\r  [${GREEN}"
+    for i in $(seq 1 $filled); do printf '#'; done
+    printf "${NC}"
+    for i in $(seq 1 $empty); do printf '.'; done
+    printf "] ${WHITE}%3d%%${NC} %s" "$pct" "$msg"
+}
+
+show_status() { printf "\n${GREEN}  ✓${NC} ${WHITE}%s${NC}\n" "$1"; }
+show_info()   { printf "  ${CYAN}ℹ${NC}  %s\n" "$1"; }
+show_warn()   { printf "  ${YELLOW}⚠${NC}  %s\n" "$1"; }
+show_error()  { printf "\n${RED}  ✗ %s${NC}\n" "$1"; }
+
+# ─── 键盘输入 ──────────────────────────────────────────────
+
+read_key() {
+    # 读取单个按键 (等待 10 秒)
+    local key
+    read -r -t 10 -n 1 key 2>/dev/null || key=""
+    echo "$key"
+}
+
+confirm() {
+    local prompt="$1" default="${2:-n}"
+    printf "\n  ${YELLOW}?${NC} ${WHITE}%s${NC} ${DIM}[y/N]${NC} " "$prompt"
+    local ans
+    read -r ans
+    case "$ans" in
+        y|Y|yes|YES) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+select_disk() {
+    # 列出可用磁盘并让用户选择
+    printf "\n  ${CYAN}可用磁盘:${NC}\n\n"
+    local disks=""
+    local i=0
+    for d in /dev/[sv]d[a-z] /dev/nvme[0-9]n[0-9] /dev/mmcblk[0-9] /dev/xvd[a-z] 2>/dev/null; do
+        [ -b "$d" ] || continue
+        # 跳过已挂载的
+        mount | grep -q "$d" && continue
+        local size=$(blockdev --getsize64 "$d" 2>/dev/null | awk '{printf "%.1f GB", $1/1073741824}')
+        [ -z "$size" ] && size="?"
+        local model=$(cat /sys/block/$(basename "$d")/device/model 2>/dev/null | tr -d '\n')
+        [ -z "$model" ] && model="Unknown"
+        i=$((i + 1))
+        printf "  ${WHITE}%d)${NC} %-12s ${GREEN}%8s${NC}  ${DIM}%s${NC}\n" "$i" "$d" "$size" "$model"
+        disks="$disks $d"
+    done
+
+    if [ "$i" -eq 0 ]; then
+        show_error "未检测到可用磁盘!"
+        return 1
+    fi
+
+    printf "\n  ${YELLOW}?${NC} 选择目标磁盘编号 ${DIM}[1-%d]${NC}: " "$i"
+    local choice
+    read -r choice
+    choice=$(echo "$choice" | tr -cd '0-9')
+    [ -z "$choice" ] && choice=1
+    [ "$choice" -lt 1 ] || [ "$choice" -gt "$i" ] && choice=1
+
+    local selected=""
+    local n=0
+    for d in $disks; do
+        n=$((n + 1))
+        [ "$n" -eq "$choice" ] && selected="$d"
+    done
+    echo "$selected"
+}
+
+# ─── 安装步骤 ──────────────────────────────────────────────
+
+step_partition() {
+    local disk="$1"
+    show_info "分区: $disk"
+
+    # 清除分区表并创建新分区
+    # 分区1: /boot  (512M, ext4)
+    # 分区2: /      (剩余空间, ext4)
+    sfdisk --quiet --wipe always "$disk" << EOF 2>/dev/null
+label: dos
+device: $disk
+unit: sectors
+
+${disk}1 : size=$((1024*1024*2)), type=83, bootable
+${disk}2 : type=83
+EOF
+
+    sleep 1
+    # 刷新分区表
+    partprobe "$disk" 2>/dev/null || blockdev --rereadpt "$disk" 2>/dev/null || true
+    sleep 1
+
+    # 确定分区设备名
+    BOOT_PART="${disk}1"
+    ROOT_PART="${disk}2"
+    case "$disk" in
+        *nvme*) BOOT_PART="${disk}p1"; ROOT_PART="${disk}p2" ;;
+        *mmcblk*) BOOT_PART="${disk}p1"; ROOT_PART="${disk}p2" ;;
+    esac
+
+    echo "$BOOT_PART:$ROOT_PART"
+}
+
+step_format() {
+    local boot_part="$1" root_part="$2"
+    show_info "格式化分区..."
+
+    draw_progress 1 3 "格式化 /boot (ext4)..."
+    mkfs.ext4 -F -L REASONIX_BOOT "$boot_part" >/dev/null 2>&1
+
+    draw_progress 2 3 "格式化 / (ext4)..."
+    mkfs.ext4 -F -L REASONIX_ROOT "$root_part" >/dev/null 2>&1
+
+    draw_progress 3 3 "完成"
+    echo ""
+    show_status "格式化完成"
+}
+
+step_mount_and_copy() {
+    local boot_part="$1" root_part="$2"
+    local mnt=$(mktemp -d)
+
+    show_info "挂载目标系统..."
+    mount "$root_part" "$mnt"
+    mkdir -p "$mnt/boot"
+    mount "$boot_part" "$mnt/boot"
+
+    show_info "复制系统文件 (可能需要几分钟)..."
+    local total=$(find / -xdev -not -path '/proc/*' -not -path '/sys/*' -not -path '/dev/*' \
+                  -not -path '/tmp/*' -not -path '/mnt/*' -not -path "$mnt/*" -type f | wc -l)
+    local count=0
+
+    # 使用 cpio 复制 (比 cp 快)
+    cd /
+    find . -xdev -not -path './proc/*' -not -path './sys/*' -not -path './dev/*' \
+           -not -path './tmp/*' -not -path './mnt/*' -not -path "./${mnt#./}/*" \
+           -print0 | cpio --null -pd "$mnt" 2>/dev/null
+
+    show_status "$total 个文件已复制"
+
+    # 创建必要的目录
+    for d in proc sys dev tmp mnt overlay overlay/upper overlay/work; do
+        mkdir -p "$mnt/$d"
+    done
+
+    echo "$mnt"
+}
+
+step_configure() {
+    local mnt="$1"
+    show_info "配置目标系统..."
+
+    # fstab
+    cat > "$mnt/etc/fstab" << FEOF
+# Reasonix Router - fstab
+# <file system>  <mount point>  <type>  <options>         <dump>  <pass>
+proc            /proc          proc    defaults            0       0
+sysfs           /sys           sysfs   defaults            0       0
+devtmpfs        /dev           devtmpfs defaults           0       0
+tmpfs           /tmp           tmpfs   defaults            0       0
+tmpfs           /var/log       tmpfs   defaults            0       0
+tmpfs           /var/run       tmpfs   defaults            0       0
+LABEL=REASONIX_ROOT  /        ext4    defaults,noatime    0       1
+LABEL=REASONIX_BOOT  /boot    ext4    defaults,noatime    0       2
+FEOF
+
+    show_status "/etc/fstab 已配置"
+}
+
+step_install_grub() {
+    local disk="$1" mnt="$2"
+    show_info "安装 GRUB 引导..."
+
+    # 安装 GRUB 到目标磁盘和分区
+    grub-install --target=i386-pc --boot-directory="$mnt/boot" "$disk" >/dev/null 2>&1
+
+    # 生成 GRUB 配置
+    mkdir -p "$mnt/boot/grub"
+    cp /boot/grub/grub.cfg "$mnt/boot/grub/" 2>/dev/null || true
+
+    # 生成更简单的启动配置
+    cat > "$mnt/boot/grub/grub.cfg" << GCFG
+# Reasonix Router - GRUB (installed)
+set default="0"
+set timeout=3
+menuentry "Reasonix Router v2" {
+    linux /boot/vmlinuz root=LABEL=REASONIX_ROOT console=tty0 console=ttyS0,115200n8
+    initrd /boot/initramfs.gz
+}
+menuentry "Reasonix Router (safe mode)" {
+    linux /boot/vmlinuz root=LABEL=REASONIX_ROOT single
+    initrd /boot/initramfs.gz
+}
+GCFG
+
+    # 复制内核和 initramfs
+    cp /boot/vmlinuz "$mnt/boot/" 2>/dev/null || cp /boot/vmlinuz-lts "$mnt/boot/vmlinuz" 2>/dev/null || true
+    cp /boot/initramfs.gz "$mnt/boot/" 2>/dev/null || true
+
+    show_status "GRUB 安装完成"
+}
+
+step_cleanup() {
+    local mnt="$1"
+    show_info "清理..."
+    sync
+    umount "$mnt/boot" 2>/dev/null || true
+    umount "$mnt" 2>/dev/null || true
+    rmdir "$mnt" 2>/dev/null || true
+    show_status "安装完成!"
+}
+
+# ─── 主流程 ──────────────────────────────────────────────
+
+main_interactive() {
+    local disk=""
+
+    clear_screen
+    hide_cursor
+    trap show_cursor EXIT INT TERM
+
+    draw_header
+
+    if [ -n "$1" ]; then
+        disk="$1"
+        show_info "目标磁盘: $disk"
+    else
+        disk=$(select_disk)
+        [ -z "$disk" ] && { show_error "未选择磁盘"; exit 1; }
+    fi
+
+    echo ""
+    show_warn "${RED}警告: $disk 上的所有数据将被清除!${NC}"
+    confirm "继续安装?" || { show_info "安装已取消"; exit 0; }
+
+    # ─── 执行安装 ───
+    echo ""
+    draw_header "正在安装 Reasonix Router..."
+
+    # 1. 分区
+    show_info "步骤 1/6: 分区"
+    parts=$(step_partition "$disk")
+    BOOT_PART="${parts%:*}"
+    ROOT_PART="${parts#*:}"
+    show_status "分区完成: $BOOT_PART / $ROOT_PART"
+
+    # 2. 格式化
+    show_info "步骤 2/6: 格式化"
+    step_format "$BOOT_PART" "$ROOT_PART"
+
+    # 3. 挂载并复制
+    show_info "步骤 3/6: 复制系统文件"
+    mnt=$(step_mount_and_copy "$BOOT_PART" "$ROOT_PART")
+
+    # 4. 配置
+    show_info "步骤 4/6: 系统配置"
+    step_configure "$mnt"
+
+    # 5. GRUB
+    show_info "步骤 5/6: 安装引导"
+    step_install_grub "$disk" "$mnt"
+
+    # 6. 清理
+    show_info "步骤 6/6: 清理"
+    step_cleanup "$mnt"
+
+    # ─── 完成 ───
+    echo ""
+    draw_header "✅ 安装成功!"
+    echo ""
+    echo "  ${WHITE}系统已安装到:${NC} $disk"
+    echo "  ${WHITE}分区:${NC}"
+    echo "    - $BOOT_PART  (/boot, ext4)"
+    echo "    - $ROOT_PART  (/, ext4)"
+    echo ""
+    echo "  ${YELLOW}移除安装介质后重启即可启动新系统。${NC}"
+    echo ""
+    printf "  ${YELLOW}?${NC} ${WHITE}立即重启?${NC} ${DIM}[y/N]${NC} "
+    read -r reboot_ans
+    case "$reboot_ans" in
+        y|Y|yes|YES)
+            show_info "重启中..."
+            reboot -f
+            ;;
+        *)
+            show_info "您可以在准备好后手动重启。"
+            ;;
+    esac
+
+    show_cursor
+}
+
+# ─── 入口 ────────────────────────────────────────────────
+
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Reasonix Router Installer"
+    echo "用法: installer [磁盘设备]"
+    echo "  installer          交互式安装"
+    echo "  installer /dev/sda  自动安装到 /dev/sda"
+    echo "  installer --help   显示此帮助"
+    exit 0
+fi
+
+main_interactive "$@"

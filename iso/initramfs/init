@@ -1,0 +1,95 @@
+#!/bin/sh
+# ============================================================
+#  Reasonix Router v2 — 独立 Linux 系统启动
+#  PID 1 — 内核启动后第一个进程
+#  功能: /usr 合并 + OverlayFS 持久化 + 运行级管理
+# ============================================================
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export HOME=/root
+
+# ─── 第一阶段: 挂载基本文件系统 ───────────────────────────
+echo "[1/5] Mounting basic filesystems..."
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+mount -t tmpfs none /tmp
+mount -t tmpfs none /var/log
+mount -t tmpfs none /var/run
+
+# 确保设备节点存在
+mknod /dev/null c 1 3 2>/dev/null
+mknod /dev/console c 5 1 2>/dev/null
+mknod /dev/tty0 c 4 0 2>/dev/null
+mknod /dev/tty1 c 4 1 2>/dev/null
+mknod /dev/ttyS0 c 4 64 2>/dev/null
+
+# ─── 第二阶段: /usr 合并 (bin→usr/bin, sbin→usr/sbin, lib→usr/lib) ─
+echo "[2/5] Setting up /usr merge..."
+# ★ 关键: 使用 busybox 路径执行 ln, 避免 rm -rf 后 ln 被删除
+BB="/usr/bin/busybox"
+[ -L /bin ] || (rm -rf /bin 2>/dev/null; $BB ln -s usr/bin /bin)
+[ -L /sbin ] || (rm -rf /sbin 2>/dev/null; $BB ln -s usr/sbin /sbin)
+[ -L /lib ] || (rm -rf /lib 2>/dev/null; $BB ln -s usr/lib /lib)
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# ─── 第三阶段: 主机名 ─────────────────────────────────────
+echo "[3/5] Setting hostname..."
+echo "reasonix-router" > /etc/hostname
+hostname -F /etc/hostname 2>/dev/null
+
+swapon -a 2>/dev/null
+
+# ─── 第四阶段: OverlayFS 持久化 ────────────────────────────
+echo "[4/5] Setting up persistent storage..."
+if [ -x /etc/init.d/S01overlay ]; then
+    /etc/init.d/S01overlay
+fi
+
+# ─── 检测安装模式 ───────────────────────────────────────
+if cat /proc/cmdline 2>/dev/null | grep -q "reasonix.install=1"; then
+    echo ""
+    echo "============================================"
+    echo "  Install mode detected!"
+    echo "  Starting system installer..."
+    echo "============================================"
+    echo ""
+    # 先启动必要服务
+    for script in /etc/init.d/S10modules /etc/init.d/S40network; do
+        [ -x "$script" ] && "$script"
+    done
+    # 启动安装器
+    if [ -x /sbin/installer ]; then
+        /sbin/installer
+    fi
+    # 安装完成后回到 shell
+    echo "Installation finished. Type 'reboot -f' to restart."
+    exec sh
+fi
+
+# ─── 第五阶段: 运行启动脚本 ────────────────────────────────
+echo "[5/5] Starting services..."
+for script in /etc/init.d/S[0-9][0-9]*; do
+    [ -x "$script" ] || continue
+    script_name=$(basename "$script")
+    echo "  -> $script_name"
+    "$script"
+done
+
+# ─── 启动完成 ──────────────────────────────────────────────
+echo ""
+echo "============================================"
+echo "  Reasonix Router v2 — System Ready"
+echo "  LAN:  http://192.168.2.1"
+echo "  WAN:  DHCP (auto)"
+echo "  Type 'help' for commands."
+echo "============================================"
+echo ""
+
+# ─── 后台控制台 ──────────────────────────────────────────
+for tty_dev in /dev/tty1 /dev/ttyS0; do
+    [ -c "$tty_dev" ] && setsid sh -c "exec sh < $tty_dev > $tty_dev 2>&1" &
+done
+
+# 主控制台
+exec sh

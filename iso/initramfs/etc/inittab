@@ -1,0 +1,16 @@
+# Reasonix Router - /etc/inittab
+# BusyBox init 配置文件
+# 注意: 系统以 /init (shell) 作为 PID 1，inittab 仅在直接运行 busybox init 时使用
+
+::sysinit:/etc/init.d/rcS
+
+# 控制台
+tty1::respawn:/sbin/getty 115200 tty1
+tty2::respawn:/sbin/getty 115200 tty2
+ttyS0::respawn:/sbin/getty 115200 ttyS0
+
+# Ctrl+Alt+Del 重启
+::ctrlaltdel:/sbin/reboot
+
+# 关机时卸载文件系统
+::shutdown:/etc/init.d/rcK

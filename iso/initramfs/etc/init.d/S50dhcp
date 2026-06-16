@@ -1,0 +1,81 @@
+#!/bin/sh
+# ============================================================
+#  DNS 缓存 & DHCP 服务器 (dnsmasq)
+#  为 LAN 客户端提供 IP 分配和 DNS 解析
+# ============================================================
+
+echo "Starting DHCP/DNS server..."
+
+LAN_IFACE=$(cat /var/run/lan_iface 2>/dev/null)
+[ -z "$LAN_IFACE" ] && LAN_IFACE="eth1"
+
+# 检测是否有 dnsmasq
+DNSMASQ_AVAIL=0
+dnsmasq --version 2>/dev/null >/dev/null && DNSMASQ_AVAIL=1
+
+mkdir -p /var/lib/misc 2>/dev/null
+
+if [ "$DNSMASQ_AVAIL" -eq 1 ]; then
+    # 生成 dnsmasq 配置
+    cat > /tmp/dnsmasq.conf << EOF
+# Reasonix Router - dnsmasq 配置
+# DHCP 服务
+interface=$LAN_IFACE
+bind-interfaces
+dhcp-range=192.168.2.100,192.168.2.200,255.255.255.0,12h
+dhcp-option=3,192.168.2.1
+dhcp-option=6,192.168.2.1
+dhcp-option=42,0.0.0.0
+dhcp-authoritative
+
+# DNS 缓存
+domain-needed
+bogus-priv
+no-resolv
+server=114.114.114.114
+server=8.8.8.8
+server=223.5.5.5
+cache-size=500
+neg-ttl=3600
+
+# 本地域名解析
+local=/router/
+address=/router/192.168.2.1
+
+# DHCP 租约文件 (CGI API 需要读取)
+dhcp-leasefile=/var/lib/misc/dnsmasq.leases
+
+# 插件集成: AdBlock (如果存在)
+conf-file=/tmp/adblock.conf
+
+# 日志
+log-dhcp
+log-facility=/var/log/dnsmasq.log
+EOF
+
+    dnsmasq -C /tmp/dnsmasq.conf --pid-file=/var/run/dnsmasq.pid
+    echo "  dnsmasq: DHCP range 192.168.2.100-200, DNS cache enabled"
+else
+    echo "  [WARN] dnsmasq not found - LAN clients need manual IP configuration"
+
+    # 应急: 使用简单的静态 DHCP (通过 udhcpd)
+    UDHCPD_AVAIL=0
+    udhcpd --help 2>/dev/null >/dev/null && UDHCPD_AVAIL=1
+
+    if [ "$UDHCPD_AVAIL" -eq 1 ]; then
+        cat > /tmp/udhcpd.conf << EOF
+start 192.168.2.100
+end 192.168.2.200
+interface $LAN_IFACE
+option subnet 255.255.255.0
+option router 192.168.2.1
+option dns 192.168.2.1
+option lease 43200
+EOF
+        touch /var/lib/misc/udhcpd.leases
+        udhcpd -f /tmp/udhcpd.conf &
+        echo "  udhcpd: DHCP server started (fallback)"
+    fi
+fi
+
+echo "  DHCP/DNS service started"

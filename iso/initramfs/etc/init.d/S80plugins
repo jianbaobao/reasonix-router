@@ -1,0 +1,65 @@
+#!/bin/sh
+# ============================================================
+#  插件加载系统
+#  扫描 /etc/plugins/*/ 加载已启用的插件
+# ============================================================
+
+echo "Loading plugins..."
+
+PLUGIN_DIR="/etc/plugins"
+
+# 创建插件数据目录
+mkdir -p /var/run/plugins 2>/dev/null
+
+# 先运行所有插件的 run.sh 收集配置
+for plugin in "$PLUGIN_DIR"/*/; do
+    [ -d "$plugin" ] || continue
+    NAME=$(basename "$plugin")
+    CONF="${plugin}plugin.conf"
+    RUNNER="${plugin}run.sh"
+    ENABLE="${plugin}enable"
+
+    if [ ! -f "$ENABLE" ]; then
+        echo "  [SKIP] $NAME (disabled)"
+        continue
+    fi
+
+    DESC=""; VERSION=""
+    [ -f "$CONF" ] && . "$CONF"
+    [ -z "$PLUGIN_DESC" ] && PLUGIN_DESC="$NAME"
+
+    if [ -x "$RUNNER" ]; then
+        echo "  [LOAD] $NAME: $PLUGIN_DESC"
+        # 前台执行初始化 (生成配置等)
+        "$RUNNER" init
+    fi
+done
+
+# 启动插件后台服务 (DDNS 等需要持续运行的)
+for plugin in "$PLUGIN_DIR"/*/; do
+    [ -d "$plugin" ] || continue
+    NAME=$(basename "$plugin")
+    ENABLE="${plugin}enable"
+    [ -f "$ENABLE" ] || continue
+
+    case "$NAME" in
+        ddns)
+            # DDNS: 每 5 分钟更新一次
+            (
+                while true; do
+                    /etc/plugins/ddns/run.sh update
+                    sleep 300
+                done
+            ) &
+            echo "  [DAEMON] DDNS updater started (interval: 5min)"
+            ;;
+    esac
+done
+
+# 通知 dnsmasq 重新加载 (adblock 等已生成配置)
+if [ -f /var/run/dnsmasq.pid ]; then
+    kill -HUP "$(cat /var/run/dnsmasq.pid)" 2>/dev/null && \
+        echo "  dnsmasq reloaded with plugin configs"
+fi
+
+echo "  Plugin loading complete"
