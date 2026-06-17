@@ -98,12 +98,27 @@ for tty_dev in /dev/tty1 /dev/ttyS0; do
     [ -c "$tty_dev" ] && setsid sh -c "exec sh < $tty_dev > $tty_dev 2>&1" &
 done
 
-# 主控制台 - 如果 exec sh 失败, 循环防止 kernel panic
-exec sh 2>/dev/null || (
-    # 尝试用 busybox 直接启动 shell
-    exec /usr/bin/busybox sh 2>/dev/null || (
-        # 终极保底: 循环等待, 防止 PID 1 退出
-        echo "CRITICAL: Cannot start shell! Entering recovery loop..."
-        while true; do sleep 3600; done
-    )
-)
+# 主控制台 — 保证 stdin/stdout/stderr 都指向控制台
+# 用绝对路径执行, 避免 PATH/symlink 问题
+console=/dev/console
+# 先确认 shell 命令是否存在
+SHELL_CMD=""
+for cmd in /bin/sh /usr/bin/busybox sh; do
+    if [ -x "$cmd" ] || (command -v "$cmd" >/dev/null 2>&1); then
+        SHELL_CMD="$cmd"
+        break
+    fi
+done
+[ -z "$SHELL_CMD" ] && SHELL_CMD="sh"
+
+# 尝试带控制台重定向的 exec
+if [ -c "$console" ]; then
+    exec <"$console" >"$console" 2>"$console" "$SHELL_CMD" 2>/dev/null
+fi
+
+# 降级: 无控制台设备时的尝试
+exec "$SHELL_CMD" 2>/dev/null || exec /usr/bin/busybox sh 2>/dev/null
+
+# 终极保底: 死循环, 防止 PID 1 退出
+echo "CRITICAL: Shell failed! Recovery loop..."
+while true; do sleep 3600; done
