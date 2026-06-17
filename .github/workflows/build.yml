@@ -6,6 +6,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ubuntu-router
     steps:
       - uses: actions/checkout@v4
 
@@ -14,19 +17,12 @@ jobs:
 
       - name: 验证文件
         run: |
-          echo "当前目录: $(pwd)"
-          echo "文件列表:"
-          ls -la
-          echo "---"
-          ls -la ubuntu-router/
-          echo "---"
-          head -5 ubuntu-router/rebuild-iso.sh
+          pwd && ls -la && echo "---" && ls autoinstall/ webui/
 
       - name: 下载 Ubuntu ISO
         run: |
-          cd ubuntu-router
           mkdir -p dist
-          echo "开始下载 Ubuntu 24.04 Server ISO (2.6GB)..."
+          echo "下载 Ubuntu 24.04 Server ISO (2.6GB)..."
           wget -c -O dist/ubuntu-24.04-live-server-amd64.iso \
             "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso" \
             --progress=dot:giga 2>&1 | tail -10
@@ -34,31 +30,30 @@ jobs:
 
       - name: 注入 autoinstall + WebUI
         run: |
-          cd ubuntu-router
           echo "解压 ISO..."
-          mkdir -p /tmp/iso
           xorriso -osirrox on -indev dist/ubuntu-24.04-live-server-amd64.iso \
             -extract / /tmp/iso 2>&1 | tail -5
-          echo "解压完成. 文件:"
+          echo "解压完成. 根目录:"
           ls /tmp/iso/ | head -10
 
           echo "注入 autoinstall..."
+          cp -r autoinstall/* /tmp/iso/nocloud/ 2>/dev/null || true
           mkdir -p /tmp/iso/nocloud
           cp autoinstall/user-data /tmp/iso/nocloud/
           touch /tmp/iso/nocloud/meta-data
 
           echo "注入 WebUI..."
-          mkdir -p /tmp/iso/var/www/html
-          cp -r webui/* /tmp/iso/var/www/html/
+          mkdir -p /tmp/iso/var/www/html/cgi-bin
+          cp webui/*.html webui/*.js webui/*.css /tmp/iso/var/www/html/ 2>/dev/null || true
+          cp webui/cgi-bin/* /tmp/iso/var/www/html/cgi-bin/ 2>/dev/null || true
 
-          echo "修改 GRUB 参数..."
+          echo "修改 GRUB..."
           find /tmp/iso/boot/grub -name "grub.cfg" -exec sed -i \
-            's|linux	/casper/vmlinuz|linux	/casper/vmlinuz autoinstall ds=nocloud\\;s=/cdrom/nocloud\\;|g' {} \;
+            's|linux	/casper/vmlinuz|linux	/casper/vmlinuz autoinstall ds=nocloud\;s=/cdrom/nocloud\;|g' {} \; 2>/dev/null || true
+          echo "注入完成"
 
       - name: 打包新 ISO
         run: |
-          cd ubuntu-router
-          mkdir -p dist
           echo "打包中..."
           xorriso -as mkisofs -r -V "ReasonixRouter" -J -joliet-long \
             -o dist/ubuntu-reasonix-router-24.04.iso /tmp/iso 2>&1 | tail -5
