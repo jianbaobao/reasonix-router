@@ -24,19 +24,20 @@ mknod /dev/tty0 c 4 0 2>/dev/null
 mknod /dev/tty1 c 4 1 2>/dev/null
 mknod /dev/ttyS0 c 4 64 2>/dev/null
 
-# ─── 第二阶段: /usr 合并 (bin→usr/bin, sbin→usr/sbin, lib→usr/lib) ─
-echo "[2/5] Setting up /usr merge..."
-# 找到 busybox 位置 (可能在 /bin/busybox 或 /usr/bin/busybox)
-BB=""
-for p in /usr/bin/busybox /bin/busybox; do
-    [ -x "$p" ] && BB="$p" && break
-done
-[ -z "$BB" ] && echo "WARNING: busybox not found!" && BB="/bin/busybox"
-
-# ★ 使用 $BB 执行 ln, 避免 rm -rf 后 ln 被删除
-[ -L /bin ] || (rm -rf /bin 2>/dev/null; $BB ln -s usr/bin /bin)
-[ -L /sbin ] || (rm -rf /sbin 2>/dev/null; $BB ln -s usr/sbin /sbin)
-[ -L /lib ] || (rm -rf /lib 2>/dev/null; $BB ln -s usr/lib /lib)
+# ─── 第二阶段: 确保 /usr 合并结构 ─────────────────────────
+echo "[2/5] Checking /usr merge..."
+# 如果 /bin 不是符号链接 (构建时未合并), 手动修复
+# ★ 关键: 先把 busybox 复制到安全位置再操作, 避免自删
+if ! [ -L /bin ]; then
+    echo "  Fixing /usr merge (copy busybox to safe location)..."
+    cp /bin/busybox /tmp/bb 2>/dev/null
+    rm -rf /bin /sbin /lib 2>/dev/null
+    /tmp/bb ln -s usr/bin /bin
+    /tmp/bb ln -s usr/sbin /sbin
+    /tmp/bb ln -s usr/lib /lib
+    rm -f /tmp/bb
+    echo "  /usr merge done"
+fi
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 # ─── 第三阶段: 主机名 ─────────────────────────────────────
