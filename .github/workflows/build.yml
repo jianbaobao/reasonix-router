@@ -8,7 +8,7 @@ name: Build Reasonix Router ISO
 on:
   push:
     branches: [ "main", "master" ]
-  workflow_dispatch:     # 支持手动触发
+  workflow_dispatch:
 
 jobs:
   build-ubuntu-router:
@@ -22,12 +22,25 @@ jobs:
         sudo apt-get update -qq
         sudo apt-get install -y -qq xorriso wget
 
+    - name: 💾 缓存 Ubuntu ISO
+      id: cache-iso
+      uses: actions/cache@v4
+      with:
+        path: ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso
+        key: ubuntu-24.04-server-iso
+
     - name: 🔨 构建 Ubuntu 路由 ISO
       run: |
         cd ubuntu-router
         chmod +x rebuild-iso.sh
-        # 尝试下载，如果失败则从缓存恢复或直接报错
-        sudo ./rebuild-iso.sh --github-actions 2>&1
+        # 缓存命中时直接用，否则下载
+        if [ -f "dist/ubuntu-24.04-live-server-amd64.iso" ]; then
+          echo "✅ 使用缓存的 Ubuntu ISO"
+          sudo ./rebuild-iso.sh dist/ubuntu-24.04-live-server-amd64.iso
+        else
+          echo "⏳ 下载 Ubuntu ISO (仅首次，后续缓存)"
+          sudo ./rebuild-iso.sh
+        fi
       timeout-minutes: 60
 
     - name: 📤 上传构建产物
@@ -41,14 +54,11 @@ jobs:
       run: |
         echo "## Reasonix Router Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
-        echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-        ISO=$(ls ubuntu-router/dist/*.iso 2>/dev/null | head -1)
+        ISO=$(ls ubuntu-router/dist/*.iso 2>/dev/null | grep -v "ubuntu-24.04-live" | head -1)
         if [ -n "$ISO" ]; then
           SIZE=$(du -h "$ISO" | cut -f1)
           echo "| ISO Size | $SIZE |" >> $GITHUB_STEP_SUMMARY
         fi
-        echo "| Build Date | $(date) |" >> $GITHUB_STEP_SUMMARY
         echo "| Base | Ubuntu 24.04 LTS Server |" >> $GITHUB_STEP_SUMMARY
         echo "| Web UI | http://192.168.2.1 |" >> $GITHUB_STEP_SUMMARY
         echo "| SSH | router@192.168.2.1 password: admin |" >> $GITHUB_STEP_SUMMARY
