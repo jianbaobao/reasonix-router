@@ -1,64 +1,71 @@
-# ============================================================
-#  Reasonix Router - GitHub Actions CI Build
-#  基于 Ubuntu 24.04 Server 自动构建软路由 ISO
-# ============================================================
-
 name: Build Reasonix Router ISO
-
 on:
-  push:
-    branches: [ "main", "master" ]
+  push: { branches: [main] }
   workflow_dispatch:
 
 jobs:
-  build-ubuntu-router:
+  build:
     runs-on: ubuntu-24.04
     steps:
-    - name: 📥 检出代码
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: 📦 安装依赖
-      run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq xorriso wget
+      - name: 安装依赖
+        run: sudo apt install -y -qq xorriso wget 2>&1 | tail -3
 
-    - name: 💾 缓存 Ubuntu ISO
-      id: cache-iso
-      uses: actions/cache@v4
-      with:
-        path: ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso
-        key: ubuntu-24.04-server-iso
+      - name: 验证文件
+        run: |
+          echo "当前目录: $(pwd)"
+          echo "文件列表:"
+          ls -la
+          echo "---"
+          ls -la ubuntu-router/
+          echo "---"
+          head -5 ubuntu-router/rebuild-iso.sh
 
-    - name: 🔨 构建 Ubuntu 路由 ISO
-      run: |
-        cd ubuntu-router
-        chmod +x rebuild-iso.sh
-        # 缓存命中时直接用，否则下载
-        if [ -f "dist/ubuntu-24.04-live-server-amd64.iso" ]; then
-          echo "✅ 使用缓存的 Ubuntu ISO"
-          sudo ./rebuild-iso.sh dist/ubuntu-24.04-live-server-amd64.iso
-        else
-          echo "⏳ 下载 Ubuntu ISO (仅首次，后续缓存)"
-          sudo ./rebuild-iso.sh
-        fi
-      timeout-minutes: 60
+      - name: 下载 Ubuntu ISO
+        run: |
+          cd ubuntu-router
+          mkdir -p dist
+          echo "开始下载 Ubuntu 24.04 Server ISO (2.6GB)..."
+          wget -c -O dist/ubuntu-24.04-live-server-amd64.iso \
+            "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso" \
+            --progress=dot:giga 2>&1 | tail -10
+          ls -lh dist/ubuntu-24.04-live-server-amd64.iso
 
-    - name: 📤 上传构建产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: ubuntu-reasonix-router-iso
-        path: ubuntu-router/dist/ubuntu-reasonix-router-24.04.iso
-        compression-level: 0
+      - name: 注入 autoinstall + WebUI
+        run: |
+          cd ubuntu-router
+          echo "解压 ISO..."
+          mkdir -p /tmp/iso
+          xorriso -osirrox on -indev dist/ubuntu-24.04-live-server-amd64.iso \
+            -extract / /tmp/iso 2>&1 | tail -5
+          echo "解压完成. 文件:"
+          ls /tmp/iso/ | head -10
 
-    - name: 📊 显示构建摘要
-      run: |
-        echo "## Reasonix Router Build Summary" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        ISO=$(ls ubuntu-router/dist/*.iso 2>/dev/null | grep -v "ubuntu-24.04-live" | head -1)
-        if [ -n "$ISO" ]; then
-          SIZE=$(du -h "$ISO" | cut -f1)
-          echo "| ISO Size | $SIZE |" >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "| Base | Ubuntu 24.04 LTS Server |" >> $GITHUB_STEP_SUMMARY
-        echo "| Web UI | http://192.168.2.1 |" >> $GITHUB_STEP_SUMMARY
-        echo "| SSH | router@192.168.2.1 password: admin |" >> $GITHUB_STEP_SUMMARY
+          echo "注入 autoinstall..."
+          mkdir -p /tmp/iso/nocloud
+          cp autoinstall/user-data /tmp/iso/nocloud/
+          touch /tmp/iso/nocloud/meta-data
+
+          echo "注入 WebUI..."
+          mkdir -p /tmp/iso/var/www/html
+          cp -r webui/* /tmp/iso/var/www/html/
+
+          echo "修改 GRUB 参数..."
+          find /tmp/iso/boot/grub -name "grub.cfg" -exec sed -i \
+            's|linux	/casper/vmlinuz|linux	/casper/vmlinuz autoinstall ds=nocloud\\;s=/cdrom/nocloud\\;|g' {} \;
+
+      - name: 打包新 ISO
+        run: |
+          cd ubuntu-router
+          mkdir -p dist
+          echo "打包中..."
+          xorriso -as mkisofs -r -V "ReasonixRouter" -J -joliet-long \
+            -o dist/ubuntu-reasonix-router-24.04.iso /tmp/iso 2>&1 | tail -5
+          ls -lh dist/ubuntu-reasonix-router-24.04.iso
+
+      - name: 上传
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-reasonix-router-iso
+          path: ubuntu-router/dist/ubuntu-reasonix-router-24.04.iso
