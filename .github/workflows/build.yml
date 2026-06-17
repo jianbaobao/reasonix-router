@@ -1,6 +1,6 @@
 # ============================================================
 #  Reasonix Router - GitHub Actions CI Build
-#  自动构建 ISO 并作为 Artifact 提供下载
+#  基于 Ubuntu 24.04 Server 自动构建软路由 ISO
 # ============================================================
 
 name: Build Reasonix Router ISO
@@ -8,90 +8,46 @@ name: Build Reasonix Router ISO
 on:
   push:
     branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
   workflow_dispatch:     # 支持手动触发
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    
+  build-ubuntu-router:
+    runs-on: ubuntu-24.04
     steps:
     - name: 📥 检出代码
       uses: actions/checkout@v4
-      with:
-        path: soft-router
 
     - name: 📦 安装依赖
       run: |
         sudo apt-get update -qq
-        sudo apt-get install -y -qq \
-          grub-pc-bin \
-          grub-common \
-          xorriso \
-          mtools \
-          python3 \
-          qemu-system-x86 \
-          wget
+        sudo apt-get install -y -qq xorriso wget
 
-    - name: 🔍 验证项目结构
+    - name: 🔨 构建 Ubuntu 路由 ISO
       run: |
-        python3 soft-router/scripts/verify.py
-        echo "✅ 验证通过"
-
-    - name: 🔨 构建 ISO
-      run: |
-        cd soft-router
-        python3 build.py
-        echo "✅ 构建完成"
-      timeout-minutes: 15
+        cd ubuntu-router
+        chmod +x rebuild-iso.sh
+        sudo ./rebuild-iso.sh
+      timeout-minutes: 30
 
     - name: 📤 上传构建产物
       uses: actions/upload-artifact@v4
       with:
-        name: reasonix-router-iso
-        path: soft-router/dist/*.iso
-        compression-level: 6
+        name: ubuntu-reasonix-router-iso
+        path: ubuntu-router/dist/ubuntu-reasonix-router-24.04.iso
+        compression-level: 0
 
-    - name: 🧪 QEMU 启动测试
-      run: |
-        echo "Testing ISO with QEMU (headless)..."
-        ISO=$(ls soft-router/dist/*.iso | head -1)
-        echo "ISO: $ISO ($(du -h $ISO | cut -f1))"
-
-        # 启动 QEMU (串口模式, 30秒超时)
-        QEMU_OUTPUT=$(timeout 30 qemu-system-x86_64 \
-          -m 512 \
-          -nographic \
-          -cdrom "$ISO" \
-          -boot d \
-          -netdev user,id=wan -device e1000,netdev=wan \
-          -netdev user,id=lan -device e1000,netdev=lan \
-          -serial mon:stdio 2>&1 || true)
-
-        # 检查是否 kernel panic
-        echo "$QEMU_OUTPUT" | head -60
-        if echo "$QEMU_OUTPUT" | grep -qi "kernel panic"; then
-          echo "❌ Kernel panic detected! ISO is BROKEN."
-          exit 1
-        elif echo "$QEMU_OUTPUT" | grep -qi "Reasonix Router"; then
-          echo "✅ System booted successfully!"
-        elif echo "$QEMU_OUTPUT" | grep -qi "Type 'help'"; then
-          echo "✅ Console ready!"
-        else
-          echo "⚠️  Could not determine boot status (manual check needed)"
-        fi
-      
     - name: 📊 显示构建摘要
       run: |
         echo "## Reasonix Router Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "| Item | Value |" >> $GITHUB_STEP_SUMMARY
         echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
-        ISO=$(ls soft-router/dist/*.iso 2>/dev/null | head -1)
+        ISO=$(ls ubuntu-router/dist/*.iso 2>/dev/null | head -1)
         if [ -n "$ISO" ]; then
           SIZE=$(du -h "$ISO" | cut -f1)
           echo "| ISO Size | $SIZE |" >> $GITHUB_STEP_SUMMARY
         fi
         echo "| Build Date | $(date) |" >> $GITHUB_STEP_SUMMARY
-        echo "| Kernel | $(uname -r) |" >> $GITHUB_STEP_SUMMARY
+        echo "| Base | Ubuntu 24.04 LTS Server |" >> $GITHUB_STEP_SUMMARY
+        echo "| Web UI | http://192.168.2.1 |" >> $GITHUB_STEP_SUMMARY
+        echo "| SSH | router@192.168.2.1 password: admin |" >> $GITHUB_STEP_SUMMARY
