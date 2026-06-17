@@ -374,28 +374,42 @@ get_ubuntu_iso() {
     local input="${1:-}"
     if [ -n "$input" ] && [ -f "$input" ]; then
         ISO_FILE="$input"
-        info "使用本地 ISO: $ISO_FILE"
+        info "使用本地 ISO: $ISO_FILE ($(du -h "$ISO_FILE" | cut -f1))"
         return
     fi
-    # 检查当前目录或 dist 目录
-    for d in "$SCRIPT_DIR/$UBUNTU_ISO_NAME" "$DIST_DIR/$UBUNTU_ISO_NAME" "$SCRIPT_DIR/../$UBUNTU_ISO_NAME"; do
-        [ -f "$d" ] && ISO_FILE="$d" && info "找到本地 ISO: $ISO_FILE" && return
+    # 检查常见路径
+    for d in "$SCRIPT_DIR/$UBUNTU_ISO_NAME" "$DIST_DIR/$UBUNTU_ISO_NAME" \
+             "$SCRIPT_DIR/../$UBUNTU_ISO_NAME" "/tmp/$UBUNTU_ISO_NAME"; do
+        [ -f "$d" ] && ISO_FILE="$d" && info "找到本地 ISO: $ISO_FILE ($(du -h "$ISO_FILE" | cut -f1))" && return
     done
     # 下载
     info "下载 Ubuntu $UBUNTU_VERSION Server ISO..."
     warn "文件较大 (~2.6GB)，请耐心等待..."
     mkdir -p "$DIST_DIR"
-    wget -O "$DIST_DIR/$UBUNTU_ISO_NAME" "$UBUNTU_URL" 2>&1 | tail -5
+    # 使用 wget 断点续传，最多重试 3 次
+    wget -c -t 3 -O "$DIST_DIR/$UBUNTU_ISO_NAME" "$UBUNTU_URL" 2>&1 | tail -5
     ISO_FILE="$DIST_DIR/$UBUNTU_ISO_NAME"
-    ok "下载完成: $ISO_FILE"
+    # 校验下载
+    if [ ! -f "$ISO_FILE" ] || [ "$(stat -c%s "$ISO_FILE" 2>/dev/null || stat -f%z "$ISO_FILE" 2>/dev/null)" -lt 100000000 ]; then
+        error "下载失败或文件不完整: $ISO_FILE"
+        error "请手动下载 Ubuntu ISO 放到 $DIST_DIR/ 目录后重试"
+        exit 1
+    fi
+    ok "下载完成: $ISO_FILE ($(du -h "$ISO_FILE" | cut -f1))"
 }
 
 # ─── 构建 ISO ──────────────────────────────────────────────
 build_iso() {
-    info "解压 Ubuntu ISO..."
+    info "解压 Ubuntu ISO ($(du -h "$ISO_FILE" | cut -f1))..."
     mkdir -p "$WORK_DIR/iso"
-    xorriso -osirrox on -indev "$ISO_FILE" -extract / "$WORK_DIR/iso" 2>/dev/null
-    ok "解压完成"
+    xorriso -osirrox on -indev "$ISO_FILE" -extract / "$WORK_DIR/iso" 2>&1 | tail -3
+    # 验证是否成功解压 (检查关键文件)
+    if [ ! -f "$WORK_DIR/iso/boot/grub/grub.cfg" ]; then
+        error "ISO 解压失败！$WORK_DIR/iso 中缺少 boot/grub/grub.cfg"
+        ls -la "$WORK_DIR/iso/" 2>/dev/null
+        exit 1
+    fi
+    ok "解压完成 ($(du -sh "$WORK_DIR/iso" | cut -f1))"
 
     info "注入 autoinstall..."
     cp -r "$WORK_DIR/nocloud" "$WORK_DIR/iso/"
