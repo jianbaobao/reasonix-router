@@ -17,21 +17,21 @@ jobs:
           rm -f ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso 2>/dev/null
           mkdir -p ubuntu-router/dist
           echo "下载 Ubuntu 24.04 ISO (2.6GB)..."
-          URLS=(
-            "https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/ubuntu-24.04-live-server-amd64.iso"
-            "https://mirrors.aliyun.com/ubuntu-releases/24.04/ubuntu-24.04-live-server-amd64.iso"
-            "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso"
-          )
-          for url in "${URLS[@]}"; do
-            echo "尝试: $url"
-            wget --timeout=120 -O ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso "$url" 2>&1 | tail -5 && break
-            echo "失败, 换下一个..."
+          # 使用 curl 尝试多个镜像
+          for url in \
+            "https://mirrors.ustc.edu.cn/ubuntu-releases/24.04/ubuntu-24.04-live-server-amd64.iso" \
+            "https://mirrors.aliyun.com/ubuntu-releases/24.04/ubuntu-24.04-live-server-amd64.iso" \
+            "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso"; do
+            echo "--- 尝试: $url ---"
+            curl -L -o ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso "$url" && break
+            echo "失败"
           done
           if [ ! -s ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso ]; then
-            echo "所有镜像都下载失败!"
+            echo "所有下载失败!"
             exit 1
           fi
           ls -lh ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso
+          echo "下载成功!"
 
       - name: 构建路由 ISO
         run: |
