@@ -24,7 +24,7 @@ jobs:
           )
           for url in "${URLS[@]}"; do
             echo "尝试: $url"
-            wget -q --timeout=120 -O ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso "$url" && break
+            wget --timeout=120 -O ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso "$url" 2>&1 | tail -5 && break
             echo "失败, 换下一个..."
           done
           if [ ! -s ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso ]; then
