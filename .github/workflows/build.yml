@@ -26,8 +26,9 @@ jobs:
       run: |
         cd ubuntu-router
         chmod +x rebuild-iso.sh
-        sudo ./rebuild-iso.sh
-      timeout-minutes: 30
+        # 尝试下载，如果失败则从缓存恢复或直接报错
+        sudo ./rebuild-iso.sh --github-actions 2>&1
+      timeout-minutes: 60
 
     - name: 📤 上传构建产物
       uses: actions/upload-artifact@v4

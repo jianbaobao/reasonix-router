@@ -386,8 +386,10 @@ get_ubuntu_iso() {
     info "下载 Ubuntu $UBUNTU_VERSION Server ISO..."
     warn "文件较大 (~2.6GB)，请耐心等待..."
     mkdir -p "$DIST_DIR"
-    # 使用 wget 断点续传，最多重试 3 次
-    wget -c -t 3 -O "$DIST_DIR/$UBUNTU_ISO_NAME" "$UBUNTU_URL" 2>&1 | tail -5
+    # 使用 wget 断点续传，最多重试 5 次，超时 300 秒
+    # 在 GitHub Actions 中输出进度到日志
+    wget -c -t 5 -T 300 -O "$DIST_DIR/$UBUNTU_ISO_NAME" "$UBUNTU_URL" \
+      --progress=dot:giga 2>&1 | tail -20
     ISO_FILE="$DIST_DIR/$UBUNTU_ISO_NAME"
     # 校验下载
     if [ ! -f "$ISO_FILE" ] || [ "$(stat -c%s "$ISO_FILE" 2>/dev/null || stat -f%z "$ISO_FILE" 2>/dev/null)" -lt 100000000 ]; then
