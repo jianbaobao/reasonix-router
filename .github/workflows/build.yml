@@ -59,18 +59,28 @@ jobs:
         ISO=$(ls soft-router/dist/*.iso | head -1)
         echo "ISO: $ISO ($(du -h $ISO | cut -f1))"
 
-        # 启动 QEMU (串口模式, 5秒超时)
-        timeout 15 qemu-system-x86_64 \
+        # 启动 QEMU (串口模式, 30秒超时)
+        QEMU_OUTPUT=$(timeout 30 qemu-system-x86_64 \
           -m 512 \
           -nographic \
           -cdrom "$ISO" \
           -boot d \
           -netdev user,id=wan -device e1000,netdev=wan \
           -netdev user,id=lan -device e1000,netdev=lan \
-          -serial mon:stdio 2>&1 | head -50 || true
+          -serial mon:stdio 2>&1 || true)
 
-        echo ""
-        echo "✅ QEMU 启动测试完成"
+        # 检查是否 kernel panic
+        echo "$QEMU_OUTPUT" | head -60
+        if echo "$QEMU_OUTPUT" | grep -qi "kernel panic"; then
+          echo "❌ Kernel panic detected! ISO is BROKEN."
+          exit 1
+        elif echo "$QEMU_OUTPUT" | grep -qi "Reasonix Router"; then
+          echo "✅ System booted successfully!"
+        elif echo "$QEMU_OUTPUT" | grep -qi "Type 'help'"; then
+          echo "✅ Console ready!"
+        else
+          echo "⚠️  Could not determine boot status (manual check needed)"
+        fi
       
     - name: 📊 显示构建摘要
       run: |
