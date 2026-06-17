@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title data-i18n="page.title">Reasonix Router - 软路由管理系统</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="container">
+    <header>
+        <div class="header-top">
+            <h1>🛜 Reasonix Router</h1>
+            <button id="lang-btn" class="lang-btn" onclick="toggleLang()" data-i18n="lang.switch">English</button>
+        </div>
+        <p class="subtitle" data-i18n="header.subtitle">软路由管理系统 v1.0</p>
+    </header>
+
+    <nav class="tabs">
+        <button class="tab active" onclick="showTab('status')" data-i18n="tab.status">📊 状态</button>
+        <button class="tab" onclick="showTab('network')" data-i18n="tab.network">🌐 网络</button>
+        <button class="tab" onclick="showTab('dhcp')" data-i18n="tab.dhcp">📡 DHCP</button>
+        <button class="tab" onclick="showTab('forward')" data-i18n="tab.forward">🔌 转发</button>
+        <button class="tab" onclick="showTab('log')" data-i18n="tab.log">📋 日志</button>
+        <button class="tab" onclick="showTab('tools')" data-i18n="tab.tools">🛠️ 工具</button>
+        <button class="tab" onclick="showTab('plugins')" data-i18n="tab.plugins">🧩 插件</button>
+        <button class="tab" onclick="showTab('system')" data-i18n="tab.system">⚙️ 系统</button>
+    </nav>
+
+    <!-- ═══════════ 状态 ═══════════ -->
+    <div id="status" class="tab-content active">
+        <h2 data-i18n="status.title">系统状态</h2>
+        <div class="card-grid">
+            <div class="card">
+                <h3 data-i18n="status.uptime">运行时间</h3>
+                <p id="uptime" data-i18n="status.loading">加载中...</p>
+            </div>
+            <div class="card">
+                <h3 data-i18n="status.memory">内存使用</h3>
+                <p id="memory" data-i18n="status.loading">加载中...</p>
+            </div>
+            <div class="card">
+                <h3 data-i18n="status.load">CPU 负载</h3>
+                <p id="loadavg" data-i18n="status.loading">加载中...</p>
+            </div>
+        </div>
+        <div class="card">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+                <h3 data-i18n="status.interfaces" style="margin:0">接口状态</h3>
+                <div>
+                    <button id="scan-btn" onclick="scanInterfaces()" class="btn-sm" data-i18n="status.scan">🔍 扫描网口</button>
+                </div>
+            </div>
+            <table id="interfaces">
+                <thead>
+                    <tr>
+                        <th data-i18n="table.interface">接口</th>
+                        <th data-i18n="table.ip">IP 地址</th>
+                        <th data-i18n="table.mac">MAC 地址</th>
+                        <th data-i18n="table.status">状态</th>
+                        <th data-i18n="table.speed">速率</th>
+                        <th data-i18n="table.rx">RX</th>
+                        <th data-i18n="table.tx">TX</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="7" data-i18n="status.loading">加载中...</td></tr>
+                </tbody>
+            </table>
+            <p style="font-size:0.8em;color:#546e7a;margin-top:6px">💡 <span data-i18n="status.click-hint">点击接口行查看详情 (MTU/双工/载波/丢包)</span></p>
+        </div>
+    </div>
+
+    <!-- ═══════════ 网络 ═══════════ -->
+    <div id="network" class="tab-content">
+        <h2 data-i18n="network.title">网络配置</h2>
+
+        <div class="card">
+            <h3 data-i18n="network.roles">接口角色配置</h3>
+            <p style="font-size:0.85em;color:#78909c;margin-bottom:8px" data-i18n="network.roles-hint">选择哪个网口作为 WAN（连接互联网）和 LAN（连接内网）</p>
+            <div class="form-row">
+                <label style="min-width:60px;color:#4fc3f7">WAN:</label>
+                <select id="role-wan" style="flex:1"></select>
+            </div>
+            <div class="form-row">
+                <label style="min-width:60px;color:#81c784">LAN:</label>
+                <select id="role-lan" style="flex:1"></select>
+            </div>
+            <div class="form-row" style="margin-top:12px">
+                <button onclick="applyInterfaceRoles()" data-i18n="network.roles-apply">应用并重启网络</button>
+                <span id="role-status" style="font-size:0.85em;color:#78909c;margin-left:12px"></span>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 data-i18n="network.routing">路由表</h3>
+            <pre id="routing-table" data-i18n="status.loading">加载中...</pre>
+        </div>
+        <div class="card">
+            <h3 data-i18n="network.nat">NAT 规则</h3>
+            <pre id="nat-rules" data-i18n="status.loading">加载中...</pre>
+        </div>
+    </div>
+
+    <!-- ═══════════ DHCP ═══════════ -->
+    <div id="dhcp" class="tab-content">
+        <h2 data-i18n="dhcp.title">DHCP 服务</h2>
+        <div class="card">
+            <h3 data-i18n="dhcp.leases">活跃租约</h3>
+            <table id="dhcp-leases">
+                <thead>
+                    <tr>
+                        <th data-i18n="table.mac">MAC 地址</th>
+                        <th data-i18n="table.ip">IP 地址</th>
+                        <th data-i18n="dhcp.hostname">主机名</th>
+                        <th data-i18n="dhcp.remaining">剩余时间</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="4" data-i18n="status.loading">加载中...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card">
+            <h3 data-i18n="dhcp.static-title">静态 DHCP 绑定</h3>
+            <table id="dhcp-static">
+                <thead>
+                    <tr>
+                        <th data-i18n="table.mac">MAC 地址</th>
+                        <th data-i18n="table.ip">IP 地址</th>
+                        <th data-i18n="dhcp.hostname">主机名</th>
+                        <th data-i18n="table.action">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="4" data-i18n="status.loading">加载中...</td></tr>
+                </tbody>
+            </table>
+            <br>
+            <details>
+                <summary data-i18n="dhcp.add-binding">➕ 添加静态绑定</summary>
+                <div class="form-row">
+                    <input type="text" id="dhcp-mac" placeholder="MAC (例: aa:bb:cc:dd:ee:ff)">
+                    <input type="text" id="dhcp-ip" placeholder="IP (例: 192.168.2.50)">
+                    <input type="text" id="dhcp-name" placeholder="Hostname (可选)">
+                    <button onclick="addDhcpHost()" data-i18n="dhcp.add-btn">添加</button>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <!-- ═══════════ 端口转发 ═══════════ -->
+    <div id="forward" class="tab-content">
+        <h2 data-i18n="forward.title">端口转发</h2>
+        <div class="card">
+            <h3 data-i18n="forward.rules">转发规则</h3>
+            <table id="forward-rules">
+                <thead>
+                    <tr>
+                        <th data-i18n="forward.proto">协议</th>
+                        <th data-i18n="forward.wan-port">WAN 端口</th>
+                        <th data-i18n="forward.lan-ip">LAN IP</th>
+                        <th data-i18n="forward.lan-port">LAN 端口</th>
+                        <th data-i18n="table.action">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td colspan="5" data-i18n="status.loading">加载中...</td></tr>
+                </tbody>
+            </table>
+            <br>
+            <details>
+                <summary data-i18n="forward.add-rule">➕ 添加转发规则</summary>
+                <div class="form-row">
+                    <select id="fw-proto">
+                        <option value="tcp">TCP</option>
+                        <option value="udp">UDP</option>
+                        <option value="tcpudp">TCP+UDP</option>
+                    </select>
+                    <input type="number" id="fw-wan-port" placeholder="WAN Port (例: 8080)" min="1" max="65535">
+                    <input type="text" id="fw-lan-ip" placeholder="LAN IP (例: 192.168.2.100)">
+                    <input type="number" id="fw-lan-port" placeholder="LAN Port (例: 80)" min="1" max="65535">
+                    <button onclick="addPortForward()" data-i18n="forward.add-btn">添加</button>
+                </div>
+            </details>
+        </div>
+    </div>
+
+    <!-- ═══════════ 日志 ═══════════ -->
+    <div id="log" class="tab-content">
+        <h2 data-i18n="log.title">系统日志</h2>
+        <div class="card">
+            <div class="form-row">
+                <input type="text" id="log-filter" placeholder="Filter keywords..." data-i18n="log.filter" style="flex:1">
+                <button onclick="refreshLog()" data-i18n="log.refresh">刷新</button>
+                <button onclick="clearLogFilter()" data-i18n="log.clear">清除</button>
+            </div>
+            <pre id="log-output" class="log-view">Loading...</pre>
+        </div>
+    </div>
+
+    <!-- ═══════════ 工具 ═══════════ -->
+    <div id="tools" class="tab-content">
+        <h2 data-i18n="tools.title">网络诊断</h2>
+
+        <!-- Ping -->
+        <div class="card">
+            <h3 data-i18n="tools.ping">Ping 测试</h3>
+            <div class="form-row">
+                <input type="text" id="ping-target" placeholder="IP or hostname (例: 8.8.8.8)" style="flex:1">
+                <button onclick="runPing()" data-i18n="tools.ping-btn">Ping</button>
+            </div>
+            <pre id="ping-output" class="log-view"></pre>
+        </div>
+
+        <!-- DNS Lookup -->
+        <div class="card">
+            <h3 data-i18n="tools.dns">DNS 查询</h3>
+            <div class="form-row">
+                <input type="text" id="dns-domain" placeholder="example.com" style="flex:1">
+                <select id="dns-type">
+                    <option value="A">A</option>
+                    <option value="AAAA">AAAA</option>
+                    <option value="MX">MX</option>
+                    <option value="TXT">TXT</option>
+                    <option value="NS">NS</option>
+                    <option value="CNAME">CNAME</option>
+                </select>
+                <button onclick="runDnsLookup()" data-i18n="tools.dns-btn">查询</button>
+            </div>
+            <pre id="dns-output" class="log-view"></pre>
+        </div>
+
+        <!-- IP Geolocation -->
+        <div class="card">
+            <h3 data-i18n="tools.geoip">IP 地理位置</h3>
+            <div class="form-row">
+                <input type="text" id="geoip-target" placeholder="IP address" style="flex:1" value="">
+                <button onclick="lookupGeoIP()" data-i18n="tools.geoip-btn">查询</button>
+                <button onclick="lookupMyIP()" data-i18n="tools.myip">我的 IP</button>
+            </div>
+            <div id="geoip-result" class="card" style="display:none"></div>
+        </div>
+    </div>
+
+    <!-- ═══════════ 插件 ═══════════ -->
+    <div id="plugins" class="tab-content">
+        <h2 data-i18n="plugins.title">插件管理</h2>
+        <div id="plugin-list"></div>
+        <br>
+        <div class="card">
+            <h3 data-i18n="plugins.store">🧩 插件商店</h3>
+            <div id="plugin-store">
+                <p data-i18n="plugins.store-loading">正在加载可用插件列表...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════ 系统 ═══════════ -->
+    <div id="system" class="tab-content">
+        <h2 data-i18n="system.title">系统管理</h2>
+        <div class="card">
+            <h3 data-i18n="system.info">系统信息</h3>
+            <pre id="sysinfo">加载中...</pre>
+        </div>
+        <div class="card">
+            <h3 data-i18n="system.actions">操作</h3>
+            <div class="actions">
+                <button onclick="execAction('restart-dhcp')" data-i18n="action.restart-dhcp">重启 DHCP</button>
+                <button onclick="execAction('flush-conntrack')" data-i18n="action.flush-conntrack">清空连接跟踪</button>
+                <button onclick="execAction('restart-network')" data-i18n="action.restart-network">重启网络</button>
+                <button onclick="confirmReboot()" class="btn-danger" data-i18n="action.reboot">重启系统</button>
+                <button onclick="confirmPoweroff()" class="btn-danger" data-i18n="action.poweroff">关机</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<footer>
+    <p>Reasonix Router &copy; 2025 - <span data-i18n="footer.text">基于 Linux 的软路由系统</span></p>
+</footer>
+
+<script src="/lang.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

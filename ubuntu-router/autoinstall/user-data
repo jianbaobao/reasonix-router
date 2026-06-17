@@ -1,0 +1,171 @@
+#cloud-config
+autoinstall:
+  version: 1
+
+  # ─── 键盘布局 ──────────────────────────────────────────
+  keyboard:
+    layout: us
+
+  # ─── 源 ────────────────────────────────────────────────
+  source:
+    id: ubuntu-server-minimal
+
+  # ─── 分区 ──────────────────────────────────────────────
+  storage:
+    layout:
+      name: lvm
+      sizing:
+        - size: 20G
+          max: 20G
+        - remaining: true
+
+  # ─── 网络 ──────────────────────────────────────────────
+  network:
+    version: 2
+    renderer: networkd
+    ethernets:
+      id0:
+        match:
+          name: en*
+        dhcp4: true
+      id1:
+        match:
+          name: en*
+        dhcp4: true
+
+  # ─── 用户 ──────────────────────────────────────────────
+  identity:
+    hostname: reasonix-router
+    username: router
+    password: "$6$rounds=4096$BwJjXxZ$Q"  # 密码: admin
+  # 允许 root SSH 登录
+  ssh:
+    allow-pw: true
+    authorized-keys: []
+
+  # ─── 包 ────────────────────────────────────────────────
+  packages:
+    - dnsmasq
+    - lighttpd
+    - iptables-persistent
+    - net-tools
+    - curl
+    - wget
+    - vlan
+    - bridge-utils
+    - haveged
+    - chrony
+
+  # ─── 后置脚本 ──────────────────────────────────────────
+  late-commands:
+    - |
+      curtin in-target --target=/target -- bash -c '
+        set -e
+
+        # ================================================
+        #  后置安装: Reasonix Router 配置
+        # ================================================
+
+        echo ">>> 配置网络..."
+
+        # 检测接口
+        WAN_IFACE=$(ip -o link show | grep -v lo | head -1 | awk -F": " "{print \$2}")
+        LAN_IFACE=$(ip -o link show | grep -v lo | tail -1 | awk -F": " "{print \$2}")
+        [ -z "$WAN_IFACE" ] && WAN_IFACE="ens33"
+        [ -z "$LAN_IFACE" ] && LAN_IFACE="ens34"
+
+        # 配置 netplan
+        cat > /etc/netplan/01-router.yaml << EOF
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    $WAN_IFACE:
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 100
+    $LAN_IFACE:
+      addresses:
+        - 192.168.2.1/24
+      dhcp4: false
+EOF
+        netplan apply 2>/dev/null || true
+
+        echo ">>> 配置 IP 转发..."
+        cat > /etc/sysctl.d/99-router.conf << EOF
+net.ipv4.ip_forward=1
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.tcp_syncookies=1
+EOF
+        sysctl -p /etc/sysctl.d/99-router.conf 2>/dev/null || true
+
+        echo ">>> 配置 dnsmasq..."
+        cat > /etc/dnsmasq.conf << EOF
+interface=$LAN_IFACE
+bind-interfaces
+dhcp-range=192.168.2.100,192.168.2.200,255.255.255.0,12h
+dhcp-option=3,192.168.2.1
+dhcp-option=6,192.168.2.1
+dhcp-authoritative
+domain-needed
+bogus-priv
+no-resolv
+server=114.114.114.114
+server=8.8.8.8
+server=223.5.5.5
+cache-size=500
+local=/router/
+address=/router/192.168.2.1
+dhcp-leasefile=/var/lib/misc/dnsmasq.leases
+log-dhcp
+log-facility=/var/log/dnsmasq.log
+EOF
+        systemctl enable dnsmasq 2>/dev/null || true
+
+        echo ">>> 配置 iptables..."
+        WAN_IFACE=\$(ip -o link show | grep -v lo | head -1 | awk -F": " "{print \$2}")
+        iptables -t nat -A POSTROUTING -o \$WAN_IFACE -j MASQUERADE
+        iptables -A FORWARD -i \$WAN_IFACE -o \$WAN_IFACE -m state --state RELATED,ESTABLISHED -j ACCEPT
+        iptables -A FORWARD -i \$LAN_IFACE -o \$WAN_IFACE -j ACCEPT
+        # 允许 Web UI 和 SSH
+        iptables -A INPUT -i \$LAN_IFACE -j ACCEPT
+        iptables -A INPUT -i \$WAN_IFACE -p tcp --dport 22 -j ACCEPT
+        iptables -A INPUT -i \$WAN_IFACE -p tcp --dport 80 -j ACCEPT
+        iptables -A INPUT -i \$WAN_IFACE -m state --state ESTABLISHED,RELATED -j ACCEPT
+        iptables -A INPUT -i \$WAN_IFACE -j DROP
+        netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+
+        echo ">>> 配置 lighttpd Web UI..."
+        mkdir -p /var/www/html/cgi-bin 2>/dev/null
+        chown -R router:router /var/www/html 2>/dev/null || true
+
+        cat > /etc/lighttpd/lighttpd.conf << EOF
+server.document-root = "/var/www/html"
+server.port = 80
+server.bind = "0.0.0.0"
+index-file.names = ("index.html")
+mimetype.assign = (
+  ".html" => "text/html",
+  ".css" => "text/css",
+  ".js" => "application/javascript",
+  ".json" => "application/json",
+  ".png" => "image/png",
+  ".svg" => "image/svg+xml"
+)
+server.modules = ("mod_cgi")
+cgi.assign = ( ".sh" => "/bin/bash" )
+include "conf.d/cgi.conf"
+EOF
+        systemctl enable lighttpd 2>/dev/null || true
+
+        echo ">>> 配置完成!"
+        echo "============================================"
+        echo "  Reasonix Router 安装完成"
+        echo "  WAN: \$WAN_IFACE (DHCP)"
+        echo "  LAN: \$LAN_IFACE (192.168.2.1)"
+        echo "  Web: http://192.168.2.1"
+        echo "============================================"
+      '
+
+  # ─── 关机 ──────────────────────────────────────────────
+  shutdown: reboot
