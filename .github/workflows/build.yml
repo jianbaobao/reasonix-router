@@ -1,63 +1,63 @@
 name: Build Reasonix Router ISO
 on:
-  push: { branches: [main] }
   workflow_dispatch:
+  push: { branches: [main] }
 
 jobs:
   build:
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        working-directory: ubuntu-router
     steps:
       - uses: actions/checkout@v4
 
       - name: 安装依赖
-        run: sudo apt install -y -qq xorriso wget 2>&1 | tail -3
-
-      - name: 验证文件
-        run: |
-          pwd && ls -la && echo "---" && ls autoinstall/ webui/
+        run: sudo apt install -y -qq xorriso wget
 
       - name: 下载 Ubuntu ISO
         run: |
-          mkdir -p dist
-          echo "下载 Ubuntu 24.04 Server ISO (2.6GB)..."
-          wget -c -O dist/ubuntu-24.04-live-server-amd64.iso \
+          rm -f ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso 2>/dev/null
+          mkdir -p ubuntu-router/dist
+          echo "下载 Ubuntu 24.04 ISO (2.6GB)..."
+          wget -O ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso \
             "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso" \
-            --progress=dot:giga 2>&1 | tail -10
-          ls -lh dist/ubuntu-24.04-live-server-amd64.iso
+            2>&1
+          ls -lh ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso
 
-      - name: 注入 autoinstall + WebUI
+      - name: 构建路由 ISO
         run: |
-          echo "解压 ISO..."
-          xorriso -osirrox on -indev dist/ubuntu-24.04-live-server-amd64.iso \
-            -extract / /tmp/iso 2>&1 | tail -5
-          echo "解压完成. 根目录:"
+          set -ex
+          ISO="ubuntu-router/dist/ubuntu-24.04-live-server-amd64.iso"
+          echo "ISO 大小: $(du -h $ISO | cut -f1)"
+
+          echo "=== 解压 ISO ==="
+          xorriso -osirrox on -indev "$ISO" -extract / /tmp/iso 2>&1
           ls /tmp/iso/ | head -10
+          echo "解压后大小: $(du -sh /tmp/iso | cut -f1)"
 
-          echo "注入 autoinstall..."
-          cp -r autoinstall/* /tmp/iso/nocloud/ 2>/dev/null || true
+          echo "=== 注入 autoinstall ==="
           mkdir -p /tmp/iso/nocloud
-          cp autoinstall/user-data /tmp/iso/nocloud/
+          cp ubuntu-router/autoinstall/user-data /tmp/iso/nocloud/
           touch /tmp/iso/nocloud/meta-data
+          echo "OK"
 
-          echo "注入 WebUI..."
+          echo "=== 注入 WebUI ==="
           mkdir -p /tmp/iso/var/www/html/cgi-bin
-          cp webui/*.html webui/*.js webui/*.css /tmp/iso/var/www/html/ 2>/dev/null || true
-          cp webui/cgi-bin/* /tmp/iso/var/www/html/cgi-bin/ 2>/dev/null || true
+          cp -r ubuntu-router/webui/* /tmp/iso/var/www/html/ 2>/dev/null || true
+          echo "OK"
 
-          echo "修改 GRUB..."
-          find /tmp/iso/boot/grub -name "grub.cfg" -exec sed -i \
-            's|linux	/casper/vmlinuz|linux	/casper/vmlinuz autoinstall ds=nocloud\;s=/cdrom/nocloud\;|g' {} \; 2>/dev/null || true
-          echo "注入完成"
+          echo "=== 修改 GRUB ==="
+          find /tmp/iso/boot/grub -name "grub.cfg" | while read f; do
+            echo "修改: $f"
+            sed -i 's|linux	/casper/vmlinuz|linux	/casper/vmlinuz autoinstall ds=nocloud\;s=/cdrom/nocloud\;|g' "$f"
+          done
+          echo "OK"
 
-      - name: 打包新 ISO
-        run: |
-          echo "打包中..."
-          xorriso -as mkisofs -r -V "ReasonixRouter" -J -joliet-long \
-            -o dist/ubuntu-reasonix-router-24.04.iso /tmp/iso 2>&1 | tail -5
-          ls -lh dist/ubuntu-reasonix-router-24.04.iso
+          echo "=== 打包 ISO ==="
+          rm -f ubuntu-router/dist/ubuntu-reasonix-router-24.04.iso
+          xorriso -as mkisofs -r -V "ReasonixRouter" \
+            -J -joliet-long \
+            -o ubuntu-router/dist/ubuntu-reasonix-router-24.04.iso \
+            /tmp/iso 2>&1
+          ls -lh ubuntu-router/dist/ubuntu-reasonix-router-24.04.iso
 
       - name: 上传
         uses: actions/upload-artifact@v4
